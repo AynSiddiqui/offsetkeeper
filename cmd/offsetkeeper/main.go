@@ -19,7 +19,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-const pingTimeout = 15 * time.Second
+// pingTimeout bounds the initial broker reachability probe; var so tests can shorten it.
+var pingTimeout = 15 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
