@@ -13,10 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/AynSiddiqui/offsetkeeper/internal/dlq"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+const pingTimeout = 15 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -81,14 +84,24 @@ func parseBrokers(raw string) []string {
 }
 
 // newClient creates a client for brokers, over TLS with the system root CAs when
-// useTLS is set. It does not dial: the first operation does, so a bad address
-// shows up there. There is no SASL; the CLI is for clusters that need nothing else.
-func newClient(brokers []string, useTLS bool) (*kgo.Client, error) {
+// useTLS is set. It fails fast by pinging the brokers with a 15s timeout.
+// There is no SASL; the CLI is for clusters that need nothing else.
+func newClient(ctx context.Context, brokers []string, useTLS bool) (*kgo.Client, error) {
 	opts := []kgo.Opt{kgo.SeedBrokers(brokers...)}
 	if useTLS {
 		opts = append(opts, kgo.DialTLSConfig(new(tls.Config)))
 	}
-	return kgo.NewClient(opts...)
+	cl, err := kgo.NewClient(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("create client: %w", err)
+	}
+	pctx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+	if err := cl.Ping(pctx); err != nil {
+		cl.Close()
+		return nil, fmt.Errorf("connect to brokers %s: %w (check -tls: omit if plaintext, pass if TLS required)", strings.Join(brokers, ","), err)
+	}
+	return cl, nil
 }
 
 // escape makes free text safe for one tab-separated line: backslash, quote,
@@ -153,7 +166,7 @@ func runDLQList(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	cl, err := newClient(brokerList, *useTLS)
+	cl, err := newClient(ctx, brokerList, *useTLS)
 	if err != nil {
 		fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
 		return 1
@@ -229,7 +242,7 @@ func runDLQReplay(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return 2
 	}
 
-	cl, err := newClient(brokerList, *useTLS)
+	cl, err := newClient(ctx, brokerList, *useTLS)
 	if err != nil {
 		fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
 		return 1

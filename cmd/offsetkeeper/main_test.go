@@ -361,3 +361,50 @@ func TestWriteErrorsExitNonzero(t *testing.T) {
 		})
 	}
 }
+
+// -tls against a plaintext broker must fail fast with exit code 1 naming the brokers and hinting at -tls.
+// Plaintext against the plaintext broker still works.
+func TestTLSAgainstPlaintextFailsFast(t *testing.T) {
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, "dlq"))
+	if err != nil {
+		t.Fatalf("kfake: %v", err)
+	}
+	t.Cleanup(cluster.Close)
+	brokers := strings.Join(cluster.ListenAddrs(), ",")
+
+	// Plaintext works
+	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	if code := run(ctx, []string{"dlq", "list", "-brokers", brokers, "-topic", "dlq"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("plaintext run = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	// -tls against plaintext returns exit code 1 within the 15s bound
+	for _, subcmd := range []string{"list", "replay"} {
+		t.Run(subcmd, func(t *testing.T) {
+			tctx, tcancel := context.WithTimeout(context.Background(), pingTimeout+5*time.Second)
+			defer tcancel()
+			start := time.Now()
+			var out, errOut bytes.Buffer
+			code := run(tctx, []string{"dlq", subcmd, "-brokers", brokers, "-topic", "dlq", "-tls"}, &out, &errOut)
+			elapsed := time.Since(start)
+			if code != 1 {
+				t.Errorf("run dlq %s -tls = %d, want 1; stderr: %s", subcmd, code, errOut.String())
+			}
+			if elapsed > pingTimeout+2*time.Second {
+				t.Errorf("run dlq %s -tls took %v, want within %v bound", subcmd, elapsed, pingTimeout)
+			}
+			s := errOut.String()
+			if !strings.Contains(s, "offsetkeeper:") {
+				t.Errorf("stderr = %q, want offsetkeeper: prefix", s)
+			}
+			if !strings.Contains(s, brokers) {
+				t.Errorf("stderr = %q, want brokers %q named", s, brokers)
+			}
+			if !strings.Contains(s, "-tls") {
+				t.Errorf("stderr = %q, want -tls hint", s)
+			}
+		})
+	}
+}
