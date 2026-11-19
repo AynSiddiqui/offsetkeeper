@@ -97,3 +97,14 @@ cluster, Apache Kafka and Redpanda.
   If the request was already sent and no response ever arrives, kgo cannot
   fail the record safely (idempotent produce), so `Run` waits until kgo fails
   it, for example when the connection drops.
+- **A drain timeout on shutdown for handlers that ignore `ctx`.** `Run` waits
+  for in-flight partition handlers to return (`wg.Wait`) before committing
+  settled offsets and returning; there is no internal drain timeout. Handlers
+  must honour `ctx.Done()`.
+- **Termination on topic deletion.** If a consumed topic is deleted while
+  `Run` is active, franz-go reports fetch errors which `Run` logs at `Warn`, and
+  `Run` continues running without crashing or terminating.
+- **Automatic large-record batch sizing for DLQ produce.** Records above ~1 MB
+  (franz-go default batch limit ~1,000,012 bytes) need
+  `kgo.ProducerBatchMaxBytes` in `Config.ClientOpts` for the DLQ write;
+  otherwise the produce fails with `ErrMessageTooLarge` and `Run` halts.
