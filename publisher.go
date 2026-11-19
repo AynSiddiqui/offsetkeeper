@@ -7,7 +7,11 @@ import (
 )
 
 // Publisher is a thin acknowledged producer on franz-go defaults (acks=all, idempotent).
-// Opts that weaken acks void the contract; they are documented, not prevented.
+// Opts that weaken acks (kgo.RequiredAcks(kgo.LeaderAck()), kgo.NoAck(), kgo.DisableIdempotentWrite)
+// void the contract; they are documented, not prevented.
+//
+// A Publisher is safe for concurrent use by multiple goroutines, as the kgo.Client
+// it wraps is.
 type Publisher struct{ cl *kgo.Client }
 
 // NewPublisher creates a Publisher with the given franz-go options.

@@ -21,8 +21,9 @@ const (
 	// maxPollRecords bounds a batch: handlers and retries for one batch must
 	// finish within the group rebalance timeout, so a batch must not be unbounded.
 	maxPollRecords = 500
-	// commitTimeout bounds the commit made on shutdown or error exit. Those
-	// commits ignore ctx's cancellation, so they need their own limit.
+	// commitTimeout bounds every batch commit. A commit must survive the cancel
+	// that ended the handlers (shutdown, error exit), so it ignores ctx and
+	// needs its own limit.
 	commitTimeout = 10 * time.Second
 )
 
@@ -30,12 +31,13 @@ const (
 // nil = done; error = retry, then DLQ (or stop). Wrap with Permanent to skip retries.
 //
 // r is a copy made for this attempt: the handler may change or re-publish its
-// fields (a produce rewrites its Partition and Offset) and
-// the commit and the DLQ record still use the record as it was polled. The
-// contents of Key, Value and Headers are shared with that record and must not be
-// modified in place; the DLQ keeps them. Handler is called concurrently for
-// different partitions and sequentially, in offset order, within one partition,
-// so state shared across records needs its own locking.
+// fields (a produce rewrites its Partition and Offset) and the commit and the
+// DLQ record still use the record as it was polled. The contents of Key, Value
+// and Headers are shared with that record and must not be modified in place; the
+// DLQ keeps them. Handler is called concurrently for different partitions and
+// sequentially, in offset order, within one partition, so state shared across
+// records needs its own locking. A record can be delivered more than once (a
+// crash or rebalance before its commit, a replay), so make the handler idempotent.
 type Handler func(ctx context.Context, r *kgo.Record) error
 
 // Config configures Run. Brokers, Group, Topics and Handler are required.
@@ -47,8 +49,11 @@ type Config struct {
 	// MaxAttempts is the total attempts per record; 0 means 3; 1 means no retries.
 	// Retries run inside the poll batch: a batch is up to 500 records per poll,
 	// handled in order per partition, and the worst-case time of all its retries
-	// (the sum of the backoffs, per failing record) must stay under the group
-	// rebalance timeout (kgo default 60s), or the group evicts this member.
+	// (the sum of the backoffs, per failing record) should stay under the group
+	// rebalance timeout (kgo default 60s). The timeout runs only once a rebalance
+	// has started: if one starts mid-batch and the batch outlives it, the group
+	// evicts this member and the batch's records are redelivered elsewhere.
+	// Without a rebalance a long batch is harmless; heartbeats continue.
 	// Example: MaxAttempts=5, Backoff=10s waits 10+20+30+30 = 90s for one record.
 	MaxAttempts int
 	// Backoff is the delay before the 2nd attempt, doubled each time, capped at
@@ -57,9 +62,14 @@ type Config struct {
 	// DLQTopic "" means Run returns the error instead of dead-lettering. It must
 	// not be in Topics (rejected); if ClientOpts adds kgo.ConsumeRegex, make the
 	// pattern exclude it, since that cannot be checked here.
-	DLQTopic   string
-	Logger     *slog.Logger // nil means slog.Default()
-	ClientOpts []kgo.Opt    // TLS, SASL, tuning; offsetkeeper appends its own group/commit opts last so they win
+	DLQTopic string
+	Logger   *slog.Logger // nil means slog.Default()
+	// ClientOpts are extra kgo options (TLS, SASL, tuning). offsetkeeper appends
+	// its own group, commit and rebalance opts last, so those cannot be undone.
+	// Producer options are not protected: kgo.RequiredAcks(kgo.LeaderAck()) or
+	// kgo.NoAck(), and kgo.DisableIdempotentWrite, weaken the DLQ produce and void
+	// the guarantee that a dead letter is durable before its source is committed.
+	ClientOpts []kgo.Opt
 }
 
 // withDefaults validates c and fills defaults. It does not modify c.
@@ -107,8 +117,9 @@ type partResult struct {
 	err     error       // non-nil: a record could not be settled and Run must stop
 }
 
-// Run consumes until ctx is cancelled (returns nil) or a record cannot be settled (returns error).
-// Creates and closes its own kgo.Client. Validates cfg first.
+// Run consumes until ctx is cancelled (returns nil) or a record cannot be settled
+// (returns the error). If the final commit fails, that error is returned even
+// after a cancel. It creates and closes its own kgo.Client and validates cfg first.
 func Run(ctx context.Context, cfg Config) error {
 	cfg, err := cfg.withDefaults()
 	if err != nil {
