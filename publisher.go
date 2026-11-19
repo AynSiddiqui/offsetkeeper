@@ -20,6 +20,8 @@ func NewPublisher(opts ...kgo.Opt) (*Publisher, error) {
 }
 
 // Publish returns only after every record is acked, or the first error.
+// It sets Partition, Offset, Timestamp and related fields on rs, as kgo does, so
+// pass a record you no longer need to read as it was.
 func (p *Publisher) Publish(ctx context.Context, rs ...*kgo.Record) error {
 	// ProduceSync returns after every record has a result; FirstErr is that
 	// result, so a nil return means the broker acked all of them.

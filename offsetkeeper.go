@@ -28,6 +28,14 @@ const (
 
 // Handler processes one record. Its return value is the only settlement:
 // nil = done; error = retry, then DLQ (or stop). Wrap with Permanent to skip retries.
+//
+// r is a copy made for this attempt: the handler may change or re-publish its
+// fields (a produce rewrites its Partition and Offset) and
+// the commit and the DLQ record still use the record as it was polled. The
+// contents of Key, Value and Headers are shared with that record and must not be
+// modified in place; the DLQ keeps them. Handler is called concurrently for
+// different partitions and sequentially, in offset order, within one partition,
+// so state shared across records needs its own locking.
 type Handler func(ctx context.Context, r *kgo.Record) error
 
 // Config configures Run. Brokers, Group, Topics and Handler are required.
@@ -282,5 +290,8 @@ func (w *worker) handle(ctx context.Context, r *kgo.Record) (err error) {
 			err = fmt.Errorf("handler panic: %v", p)
 		}
 	}()
-	return w.cfg.Handler(ctx, r)
+	// A fresh copy per attempt: kgo's produce path rewrites Partition and Offset
+	// on a record it is given, and r is what the commit and the DLQ read.
+	c := *r
+	return w.cfg.Handler(ctx, &c)
 }

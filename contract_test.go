@@ -1079,3 +1079,57 @@ func TestDLQProduceTimeoutStopsRun(t *testing.T) {
 		t.Errorf("committed %d, want exactly 1 (offset 0 settled, 1's DLQ write failed)", got)
 	}
 }
+
+// A handler that re-publishes the record it was given (a "retry later" pattern)
+// makes kgo rewrite that record's Offset; the commit must not follow it.
+func TestHandlerCannotMoveCommit(t *testing.T) {
+	e, ctx := newEnv(t, 1), testCtx(t)
+	e.produce(t, "r", 3)
+	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(e.brokers...))
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	t.Cleanup(p.Close)
+	cfg := e.cfg(func(ctx context.Context, rec *kgo.Record) error {
+		if rec.Offset == 1 {
+			return errBoom
+		}
+		return p.Publish(ctx, rec) // moves rec.Offset past the end of the topic
+	})
+	if err := start(t, ctx, cfg).wait(t, waitFor); err == nil {
+		t.Fatal("Run returned nil though offset 1 failed without a DLQ")
+	}
+	if got := e.committed(t)[0]; got != 1 {
+		t.Errorf("committed %d, want exactly 1 (only offset 0 settled)", got)
+	}
+}
+
+// A handler that rewrites the record's routing fields before failing must not
+// change what the DLQ says about the source.
+func TestDLQNamesOriginalSource(t *testing.T) {
+	e, ctx := newEnv(t, 1), testCtx(t)
+	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e.produce(t, "r", 3)
+	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+		if rec.Offset == 1 {
+			rec.Topic, rec.Partition, rec.Offset = "elsewhere", 7, 99
+			return errBoom
+		}
+		return nil
+	})
+	cfg.DLQTopic = dlqTopic
+	start(t, ctx, cfg).until(t, "source drained", func() bool { return e.drained(t) })
+
+	recs := testenv.Records(t, e.brokers, dlqTopic)
+	if len(recs) != 1 {
+		t.Fatalf("DLQ has %d records, want 1", len(recs))
+	}
+	want := map[string]string{
+		dlq.HeaderSourceTopic: e.topic, dlq.HeaderSourcePartition: "0", dlq.HeaderSourceOffset: "1",
+	}
+	for k, v := range want {
+		if got, _ := header(recs[0], k); got != v {
+			t.Errorf("DLQ header %s = %q, want %q", k, got, v)
+		}
+	}
+}
