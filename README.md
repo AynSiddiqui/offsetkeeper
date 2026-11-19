@@ -3,7 +3,11 @@
 A Kafka consumer runtime for Go on franz-go with retries and a dead-letter
 queue that cannot commit past an unsettled record.
 
-**Status:** pre-release, not yet tagged.
+**Status:** v0.1.0, the first release. Before v1.0.0 the API may change in a minor release; the [changelog](CHANGELOG.md) says when.
+
+```bash
+go get github.com/AynSiddiqui/offsetkeeper@v0.1.0
+```
 
 - [CONTRACT.md](CONTRACT.md): what is guaranteed, and the test behind each guarantee
 - [CONTRIBUTING.md](CONTRIBUTING.md): how the code is written
@@ -78,11 +82,10 @@ See [CONTRACT.md](CONTRACT.md) for the full contract and test suite.
 Install the CLI tool:
 
 ```bash
-# Before the first tag, from a checkout:
-go install ./cmd/offsetkeeper
-
-# After the v0.1.0 release tag:
 go install github.com/AynSiddiqui/offsetkeeper/cmd/offsetkeeper@v0.1.0
+
+# Or, from a checkout:
+go install ./cmd/offsetkeeper
 ```
 
 ### Local demo
