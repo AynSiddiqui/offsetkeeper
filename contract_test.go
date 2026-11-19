@@ -510,6 +510,33 @@ func TestProduceIsAcknowledged(t *testing.T) {
 	}
 }
 
+// A nil record passed to Publish returns an error naming its index; no records are produced.
+func TestPublisherNilRecord(t *testing.T) {
+	e, ctx := newEnv(t, 1), testCtx(t)
+	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(e.brokers...))
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	t.Cleanup(p.Close)
+
+	err = p.Publish(ctx, nil)
+	want := "offsetkeeper: publish: nil record at index 0"
+	if err == nil || err.Error() != want {
+		t.Errorf("Publish(nil) err = %v, want %q", err, want)
+	}
+
+	validRec := &kgo.Record{Topic: e.topic, Value: []byte("val")}
+	err = p.Publish(ctx, validRec, nil)
+	want1 := "offsetkeeper: publish: nil record at index 1"
+	if err == nil || err.Error() != want1 {
+		t.Errorf("Publish(valid, nil) err = %v, want %q", err, want1)
+	}
+
+	if recs := testenv.Records(t, e.brokers, e.topic); len(recs) != 0 {
+		t.Errorf("Publish produced %d records on nil record error, want 0", len(recs))
+	}
+}
+
 // If the DLQ write fails, the source record stays unsettled and Run returns an error.
 func TestFailedDLQPublishDoesNotSettleSource(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)

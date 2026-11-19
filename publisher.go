@@ -3,6 +3,7 @@ package offsetkeeper
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -29,6 +30,9 @@ func NewPublisher(opts ...kgo.Opt) (*Publisher, error) {
 // It sets Partition, Offset, Timestamp and related fields on rs, as kgo does, so
 // pass a record you no longer need to read as it was.
 func (p *Publisher) Publish(ctx context.Context, rs ...*kgo.Record) error {
+	if i := slices.Index(rs, nil); i >= 0 {
+		return fmt.Errorf("offsetkeeper: publish: nil record at index %d", i)
+	}
 	// ProduceSync returns after every record has a result; FirstErr is that
 	// result, so a nil return means the broker acked all of them.
 	if err := p.cl.ProduceSync(ctx, rs...).FirstErr(); err != nil {
