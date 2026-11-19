@@ -1,0 +1,41 @@
+name: Bug report
+description: Something does not behave as CONTRACT.md says
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Security issues go through private reporting (see SECURITY.md), not here.
+  - type: input
+    id: version
+    attributes:
+      label: offsetkeeper version or commit
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Go version, broker (Kafka/Redpanda/kfake) and version
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+      description: Name the CONTRACT.md guarantee if one is broken (lost record, early commit, order).
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Config and handler, or a failing test.
+      render: go
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: slog output around the failure. Remove record contents and credentials.
+      render: text

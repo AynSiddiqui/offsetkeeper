@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose a change before writing code
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do today? Show the code you would write.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API and behavior
+      description: Exported identifiers, defaults, and the CONTRACT.md guarantee it touches.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Can handler code, ClientOpts or a separate package do it instead?
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: It needs no dependency beyond stdlib and franz-go
+        - label: I will implement it after a maintainer agrees
