@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -21,6 +22,12 @@ const (
 	HeaderSourceOffset    = "offsetkeeper.source.offset"
 	HeaderError           = "offsetkeeper.error"
 	HeaderAttempts        = "offsetkeeper.attempts"
+
+	// maxErrorBytes caps the HeaderError value, marker included. An unbounded
+	// handler error (say, one wrapping an HTTP body) could make the DLQ record
+	// too large for the broker, and Run would then stop on every restart.
+	maxErrorBytes = 4 << 10
+	truncMarker   = "…(truncated)"
 
 	// headerPrefix marks every header offsetkeeper owns; replay strips them.
 	headerPrefix = "offsetkeeper."
@@ -37,11 +44,19 @@ type Entry struct {
 	Err             string
 }
 
-// Headers returns src's headers plus the offsetkeeper.* headers. src is not modified.
+// Headers returns src's headers plus the offsetkeeper.* headers. The error text
+// is cut to 4 KiB with a "…(truncated)" marker. src is not modified.
 func Headers(src *kgo.Record, attempts int, err error) []kgo.RecordHeader {
 	msg := ""
 	if err != nil {
 		msg = err.Error()
+	}
+	if len(msg) > maxErrorBytes {
+		cut := maxErrorBytes - len(truncMarker)
+		for cut > 0 && !utf8.RuneStart(msg[cut]) { // never split a multi-byte rune
+			cut--
+		}
+		msg = msg[:cut] + truncMarker
 	}
 	// Fresh slice: appending to src.Headers could write into its backing array.
 	hs := make([]kgo.RecordHeader, 0, len(src.Headers)+5)

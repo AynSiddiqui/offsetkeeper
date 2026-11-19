@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -34,6 +36,19 @@ func TestHeaders(t *testing.T) {
 	}
 	if hs := Headers(src, 1, nil); string(hs[len(hs)-2].Value) != "" {
 		t.Errorf("nil error must give an empty %s, got %q", HeaderError, hs[len(hs)-2].Value)
+	}
+	// "é" is 2 bytes, so an odd cut point would split a rune.
+	for _, unit := range []string{"x", "é"} {
+		msg := strings.Repeat(unit, 1<<20)
+		hs := Headers(&kgo.Record{Topic: "t"}, 1, errors.New(msg))
+		got := string(hs[len(hs)-2].Value)
+		if len(got) > maxErrorBytes || !strings.HasSuffix(got, truncMarker) || !strings.HasPrefix(got, unit) || !utf8.ValidString(got) {
+			t.Errorf("1 MiB of %q: header is %d bytes, suffix ok %v, valid UTF-8 %v; want <= %d bytes, marker, valid UTF-8",
+				unit, len(got), strings.HasSuffix(got, truncMarker), utf8.ValidString(got), maxErrorBytes)
+		}
+	}
+	if hs := Headers(&kgo.Record{}, 1, errors.New("short")); string(hs[len(hs)-2].Value) != "short" {
+		t.Errorf("short error was altered: %q", hs[len(hs)-2].Value)
 	}
 }
 

@@ -1224,3 +1224,33 @@ func TestPublishUsesAcksAllAndIdempotence(t *testing.T) {
 	start(t, ctx, cfg).until(t, "dead-lettered and drained", func() bool { return e.drained(t) })
 	checkAcksAll(t, "DLQ produce", seen()) // Run produces only the dead letter
 }
+
+// A handler error far larger than the broker accepts must not make the DLQ
+// record unwritable: the header is capped, so the record is dead-lettered and
+// the source commit moves on.
+func TestDLQErrorHeaderCapped(t *testing.T) {
+	e, ctx := newEnv(t, 1), testCtx(t)
+	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e.produce(t, "r", 2)
+	huge := errors.New(strings.Repeat("x", 2<<20))
+	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+		if rec.Offset == 1 {
+			return huge
+		}
+		return nil
+	})
+	cfg.DLQTopic = dlqTopic
+	start(t, ctx, cfg).until(t, "source drained", func() bool { return e.drained(t) })
+
+	recs := testenv.Records(t, e.brokers, dlqTopic)
+	if len(recs) != 1 {
+		t.Fatalf("DLQ has %d records, want 1", len(recs))
+	}
+	got, _ := header(recs[0], "offsetkeeper.error")
+	if len(got) > 4096 || !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("DLQ error header is %d bytes, want <= 4096 ending in the truncation marker", len(got))
+	}
+	if c := e.committed(t)[0]; c != 2 {
+		t.Errorf("committed %d, want 2", c)
+	}
+}
