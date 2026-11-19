@@ -2,6 +2,7 @@ package offsetkeeper
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -18,7 +19,7 @@ type Publisher struct{ cl *kgo.Client }
 func NewPublisher(opts ...kgo.Opt) (*Publisher, error) {
 	cl, err := kgo.NewClient(opts...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("offsetkeeper: create publisher: %w", err)
 	}
 	return &Publisher{cl}, nil
 }
@@ -29,7 +30,10 @@ func NewPublisher(opts ...kgo.Opt) (*Publisher, error) {
 func (p *Publisher) Publish(ctx context.Context, rs ...*kgo.Record) error {
 	// ProduceSync returns after every record has a result; FirstErr is that
 	// result, so a nil return means the broker acked all of them.
-	return p.cl.ProduceSync(ctx, rs...).FirstErr()
+	if err := p.cl.ProduceSync(ctx, rs...).FirstErr(); err != nil {
+		return fmt.Errorf("offsetkeeper: publish: %w", err)
+	}
+	return nil
 }
 
 // Close releases the Publisher's resources.

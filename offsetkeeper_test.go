@@ -204,3 +204,23 @@ func TestBatchErrorCommitsOtherPartitions(t *testing.T) {
 		t.Errorf("committed %v, want partition 0 and 1 at exactly 2 (their settled prefixes)", got)
 	}
 }
+
+// A Run that starts with a cancelled ctx returns nil without touching the
+// handler. The unreachable broker would fail any poll that did happen.
+func TestRunStartedCancelledReturnsNil(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := validConfig()
+	c.Brokers = []string{"127.0.0.1:1"}
+	c.Handler = func(context.Context, *kgo.Record) error { t.Error("handler called"); return nil }
+	if err := Run(ctx, c); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+}
+
+func TestNewPublisherWrapsError(t *testing.T) {
+	_, err := NewPublisher(kgo.ProducerBatchMaxBytes(-1))
+	if err == nil || !strings.HasPrefix(err.Error(), "offsetkeeper: create publisher: ") || errors.Unwrap(err) == nil {
+		t.Fatalf("NewPublisher error = %v, want %q prefix wrapping the cause", err, "offsetkeeper: create publisher: ")
+	}
+}

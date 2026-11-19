@@ -505,6 +505,8 @@ func TestProduceIsAcknowledged(t *testing.T) {
 		t.Error("Publish to a missing topic returned nil")
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Publish to a missing topic hung until the deadline: %v", err)
+	} else if !strings.HasPrefix(err.Error(), "offsetkeeper: publish: ") || errors.Unwrap(err) == nil {
+		t.Errorf("Publish error = %q, want %q prefix wrapping the cause", err, "offsetkeeper: publish: ")
 	}
 }
 

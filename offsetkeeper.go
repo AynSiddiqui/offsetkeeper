@@ -142,7 +142,8 @@ func Run(ctx context.Context, cfg Config) error {
 	defer cl.CloseAllowingRebalance()
 
 	w := &worker{cfg: cfg, cl: cl}
-	for {
+	// Checking ctx first means a Run that starts cancelled never polls.
+	for ctx.Err() == nil {
 		fetches := cl.PollRecords(ctx, maxPollRecords)
 		// Closed client or done ctx: this is the shutdown path, not a failure.
 		// The previous batch was already committed, so nothing is pending.
@@ -155,12 +156,11 @@ func Run(ctx context.Context, cfg Config) error {
 		if err := w.batch(ctx, fetches); err != nil {
 			return err
 		}
+		// The loop condition stops here after a cancel: no poll, since kgo
+		// would re-take the rebalance gate for nothing.
 		cl.AllowRebalance()
-		// No poll after cancel: kgo would re-take the rebalance gate for nothing.
-		if ctx.Err() != nil {
-			return nil
-		}
 	}
+	return nil
 }
 
 // batch handles one poll: one goroutine per partition, then one synchronous
