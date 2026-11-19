@@ -43,20 +43,45 @@ func TestConfigDefaults(t *testing.T) {
 
 func TestConfigValidation(t *testing.T) {
 	for name, mut := range map[string]func(*Config){
-		"brokers":       func(c *Config) { c.Brokers = nil },
-		"group":         func(c *Config) { c.Group = "" },
-		"topics":        func(c *Config) { c.Topics = nil },
-		"handler":       func(c *Config) { c.Handler = nil },
-		"maxattempts":   func(c *Config) { c.MaxAttempts = -1 },
-		"backoff":       func(c *Config) { c.Backoff = -1 },
-		"dlq in topics": func(c *Config) { c.DLQTopic = c.Topics[0] },
+		"brokers":           func(c *Config) { c.Brokers = nil },
+		"empty broker":      func(c *Config) { c.Brokers = []string{""} },
+		"empty broker at 1": func(c *Config) { c.Brokers = []string{"localhost:9092", ""} },
+		"group":             func(c *Config) { c.Group = "" },
+		"topics":            func(c *Config) { c.Topics = nil },
+		"empty topic":       func(c *Config) { c.Topics = []string{""} },
+		"empty topic at 1":  func(c *Config) { c.Topics = []string{"topic", ""} },
+		"handler":           func(c *Config) { c.Handler = nil },
+		"maxattempts":       func(c *Config) { c.MaxAttempts = -1 },
+		"backoff":           func(c *Config) { c.Backoff = -1 },
+		"dlq in topics":     func(c *Config) { c.DLQTopic = c.Topics[0] },
 	} {
 		c := validConfig()
 		mut(&c)
 		if _, err := c.withDefaults(); err == nil {
 			t.Errorf("%s: want error", name)
-		} else if name == "dlq in topics" && !strings.Contains(err.Error(), "Config.DLQTopic") {
-			t.Errorf("%s: error %q should name Config.DLQTopic", name, err)
+		} else {
+			switch name {
+			case "dlq in topics":
+				if !strings.Contains(err.Error(), "Config.DLQTopic") {
+					t.Errorf("%s: error %q should name Config.DLQTopic", name, err)
+				}
+			case "empty broker":
+				if !strings.Contains(err.Error(), "Config.Brokers[0]") {
+					t.Errorf("%s: error %q should name Config.Brokers[0]", name, err)
+				}
+			case "empty broker at 1":
+				if !strings.Contains(err.Error(), "Config.Brokers[1]") {
+					t.Errorf("%s: error %q should name Config.Brokers[1]", name, err)
+				}
+			case "empty topic":
+				if !strings.Contains(err.Error(), "Config.Topics[0]") {
+					t.Errorf("%s: error %q should name Config.Topics[0]", name, err)
+				}
+			case "empty topic at 1":
+				if !strings.Contains(err.Error(), "Config.Topics[1]") {
+					t.Errorf("%s: error %q should name Config.Topics[1]", name, err)
+				}
+			}
 		}
 		// A short deadline so a missing check fails here instead of hanging on the fake broker.
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
