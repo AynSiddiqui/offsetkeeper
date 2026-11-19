@@ -24,7 +24,7 @@ var (
 )
 
 // Brokers returns the seed brokers: OFFSETKEEPER_BROKERS (comma separated) once
-// it answers metadata, else a fresh in-process kfake cluster closed on cleanup.
+// it answers metadata and has a group coordinator, else a fresh in-process kfake cluster closed on cleanup.
 func Brokers(t testing.TB) []string {
 	t.Helper()
 	if env := os.Getenv("OFFSETKEEPER_BROKERS"); env != "" {
@@ -38,6 +38,12 @@ func Brokers(t testing.TB) []string {
 			_, last = adm.ListBrokers(ctx)
 			return last == nil
 		}, "broker "+env+" to answer metadata")
+		Eventually(t, brokerT, func() bool { // a cold broker creates __consumer_offsets lazily
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, last = adm.FetchOffsets(ctx, Group(t))
+			return last == nil
+		}, "a group coordinator on "+env)
 		return brokers
 	}
 	return Kfake(t).ListenAddrs()
@@ -68,7 +74,10 @@ func name(t testing.TB, kind string) string {
 // Group returns a consumer group name unique to this call.
 func Group(t testing.TB) string { return name(t, "group") }
 
-// Topic creates a uniquely named topic with the given partition count.
+// Topic creates a uniquely named topic with the given partition count and waits
+// until the broker serves every partition: CreateTopic returns once the
+// controller accepts the request, but right after broker startup other requests
+// can still answer UNKNOWN_TOPIC_OR_PARTITION.
 func Topic(t testing.TB, brokers []string, partitions int32) string {
 	t.Helper()
 	topic := name(t, "topic")
@@ -85,6 +94,21 @@ func Topic(t testing.TB, brokers []string, partitions int32) string {
 		}
 		return err == nil
 	}, "topic "+topic+" to be created")
+	Eventually(t, 30*time.Second, func() bool { // ListOffsets needs a leader for every partition
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		offs, err := adm.ListStartOffsets(ctx, topic)
+		if err == nil {
+			err = offs.Error()
+		}
+		if err == nil && len(offs[topic]) != int(partitions) {
+			err = fmt.Errorf("%d of %d partitions listed", len(offs[topic]), partitions)
+		}
+		if err != nil {
+			t.Logf("topic %s not ready: %v", topic, err)
+		}
+		return err == nil
+	}, "topic "+topic+" to have a leader for every partition")
 	return topic
 }
 
