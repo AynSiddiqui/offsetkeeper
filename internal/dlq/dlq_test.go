@@ -63,6 +63,15 @@ func TestDecodeRoundTrip(t *testing.T) {
 	if e := decode(&kgo.Record{Headers: Headers(src, 1, nil)}); e.SourceTopic != "orders" {
 		t.Errorf("source topic = %q, want orders", e.SourceTopic)
 	}
+	// Out-of-range or non-numeric values decode to zero, not to a saturated maximum.
+	bad := &kgo.Record{Headers: []kgo.RecordHeader{
+		{Key: HeaderSourcePartition, Value: []byte("99999999999")},
+		{Key: HeaderSourceOffset, Value: []byte("99999999999999999999")},
+		{Key: HeaderAttempts, Value: []byte("99999999999999999999")},
+	}}
+	if e := decode(bad); e.SourcePartition != 0 || e.SourceOffset != 0 || e.Attempts != 0 {
+		t.Errorf("decode of out-of-range headers = partition %d, offset %d, attempts %d, want all 0", e.SourcePartition, e.SourceOffset, e.Attempts)
+	}
 }
 
 func newClient(t *testing.T, brokers []string) *kgo.Client {

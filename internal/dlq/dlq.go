@@ -81,14 +81,27 @@ func decode(r *kgo.Record) Entry {
 		case HeaderSourceTopic:
 			e.SourceTopic = v
 		case HeaderSourcePartition:
-			n, _ := strconv.ParseInt(v, 10, 32)
+			// ParseInt and Atoi return the saturated maximum on a range error; a
+			// header that does not parse must decode to zero, as Entry documents.
+			n, err := strconv.ParseInt(v, 10, 32)
+			if err != nil {
+				n = 0
+			}
 			e.SourcePartition = int32(n)
 		case HeaderSourceOffset:
-			e.SourceOffset, _ = strconv.ParseInt(v, 10, 64)
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				n = 0
+			}
+			e.SourceOffset = n
 		case HeaderError:
 			e.Err = v
 		case HeaderAttempts:
-			e.Attempts, _ = strconv.Atoi(v)
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				n = 0
+			}
+			e.Attempts = n
 		}
 	}
 	return e
