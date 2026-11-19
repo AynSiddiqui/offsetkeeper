@@ -145,3 +145,62 @@ func TestBatchSplitFetchSamePartition(t *testing.T) {
 		t.Errorf("committed %d, want 1 (only offset 0 settled)", got)
 	}
 }
+
+// One partition fails while the other is healthy: batch still commits the healthy
+// partition's settled prefix (exactly 2) and not the record still in flight. Both
+// partitions are in one hand-built fetch, so no poll timing is involved.
+func TestBatchErrorCommitsOtherPartitions(t *testing.T) {
+	brokers := testenv.Brokers(t)
+	topic, group := testenv.Topic(t, brokers, 2), testenv.Group(t)
+	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.ConsumerGroup(group), kgo.DisableAutoCommit())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var f kgo.Fetch
+	ft := kgo.FetchTopic{Topic: topic}
+	for p := int32(0); p < 2; p++ {
+		fp := kgo.FetchPartition{Partition: p}
+		for o := int64(0); o < 5; o++ {
+			fp.Records = append(fp.Records, &kgo.Record{Topic: topic, Partition: p, Offset: o})
+		}
+		ft.Partitions = append(ft.Partitions, fp)
+	}
+	f.Topics = []kgo.FetchTopic{ft}
+
+	errBoom := errors.New("boom")
+	p1Settled := make(chan struct{})
+	w := &worker{cl: cl, cfg: Config{
+		MaxAttempts: 1, Backoff: time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// No t.Fatal here: handlers run on other goroutines. A wrong choreography
+		// shows up as the wrong batch error or commit below.
+		Handler: func(ctx context.Context, r *kgo.Record) error {
+			switch {
+			case r.Partition == 1 && r.Offset == 1:
+				close(p1Settled) // returns nil right after: offsets 0 and 1 are settled
+			case r.Partition == 1 && r.Offset >= 2:
+				<-ctx.Done() // in flight until the failure cancels the batch
+				return ctx.Err()
+			case r.Partition == 0 && r.Offset == 2:
+				select {
+				case <-p1Settled:
+					return errBoom
+				case <-time.After(10 * time.Second):
+					return errors.New("partition 1 never settled offset 1")
+				}
+			}
+			return nil
+		},
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := w.batch(ctx, kgo.Fetches{f}); !errors.Is(err, errBoom) {
+		t.Fatalf("batch returned %v, want the handler error", err)
+	}
+	got := testenv.Committed(t, brokers, group, topic)
+	if got[0] != 2 || got[1] != 2 {
+		t.Errorf("committed %v, want partition 0 and 1 at exactly 2 (their settled prefixes)", got)
+	}
+}
