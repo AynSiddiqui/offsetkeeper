@@ -3,11 +3,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -77,6 +80,23 @@ func parseBrokers(raw string) []string {
 	return list
 }
 
+// newClient connects to brokers, over TLS with the system root CAs when useTLS
+// is set. There is no SASL; the CLI is for clusters that need nothing else.
+func newClient(brokers []string, useTLS bool) (*kgo.Client, error) {
+	opts := []kgo.Opt{kgo.SeedBrokers(brokers...)}
+	if useTLS {
+		opts = append(opts, kgo.DialTLSConfig(new(tls.Config)))
+	}
+	return kgo.NewClient(opts...)
+}
+
+// escape makes free text safe for one tab-separated line: backslash, quote,
+// tab, newline and other control or non-printable characters become Go escapes.
+func escape(s string) string {
+	q := strconv.Quote(s)
+	return q[1 : len(q)-1]
+}
+
 func validateCommon(fs *flag.FlagSet, brokers, topic string, stderr io.Writer) ([]string, bool) {
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "unexpected positional arguments: %v\n", fs.Args())
@@ -118,9 +138,12 @@ func runDLQ(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 func runDLQList(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	fs := initFlagSet("dlq list", "offsetkeeper dlq list -brokers <brokers> -topic <topic>", stderr)
+	fs := initFlagSet("dlq list", "offsetkeeper dlq list -brokers <brokers> -topic <topic> [-tls]\n\n"+
+		"Rows print as they arrive: offsets in order within a partition, partitions interleaved.\n"+
+		"source_topic and error are escaped (\\t, \\n, \\\\, \\\", non-printable bytes) so each record is one line.", stderr)
 	brokers := fs.String("brokers", "", "comma-separated Kafka broker addresses (required)")
 	topic := fs.String("topic", "", "DLQ topic name (required)")
+	useTLS := fs.Bool("tls", false, "connect over TLS using the system root CAs (no SASL)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -129,36 +152,40 @@ func runDLQList(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokerList...))
+	cl, err := newClient(brokerList, *useTLS)
 	if err != nil {
 		fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
 		return 1
 	}
 	defer cl.Close()
 
-	entries, err := dlq.List(ctx, cl, *topic)
+	// The header waits for the first row or a clean finish, so a failed List
+	// (missing topic) prints no header.
+	headerDone := false
+	header := func() {
+		if !headerDone {
+			fmt.Fprintln(stdout, "partition\toffset\tsource_topic\tsource_partition\tsource_offset\tattempts\terror")
+			headerDone = true
+		}
+	}
+	err = dlq.List(ctx, cl, *topic, func(e dlq.Entry) error {
+		header()
+		fmt.Fprintf(stdout, "%d\t%d\t%s\t%d\t%d\t%d\t%s\n", e.Record.Partition, e.Record.Offset, escape(e.SourceTopic), e.SourcePartition, e.SourceOffset, e.Attempts, escape(e.Err))
+		return nil
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
 		return 1
 	}
-
-	fmt.Fprintln(stdout, "partition\toffset\tsource_topic\tsource_partition\tsource_offset\tattempts\terror")
-	for _, e := range entries {
-		var p int32
-		var o int64
-		if e.Record != nil {
-			p = e.Record.Partition
-			o = e.Record.Offset
-		}
-		fmt.Fprintf(stdout, "%d\t%d\t%s\t%d\t%d\t%d\t%s\n", p, o, e.SourceTopic, e.SourcePartition, e.SourceOffset, e.Attempts, e.Err)
-	}
+	header()
 	return 0
 }
 
 func runDLQReplay(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	fs := initFlagSet("dlq replay", "offsetkeeper dlq replay -brokers <brokers> -topic <topic> [-partition <partition> -offset <offset>]", stderr)
+	fs := initFlagSet("dlq replay", "offsetkeeper dlq replay -brokers <brokers> -topic <topic> [-partition <partition> -offset <offset>] [-tls]", stderr)
 	brokers := fs.String("brokers", "", "comma-separated Kafka broker addresses (required)")
 	topic := fs.String("topic", "", "DLQ topic name (required)")
+	useTLS := fs.Bool("tls", false, "connect over TLS using the system root CAs (no SASL)")
 	partition := fs.Int("partition", -1, "partition of the DLQ record to replay (must be given with -offset)")
 	offset := fs.Int64("offset", -1, "offset of the DLQ record to replay (must be given with -partition)")
 	if err := fs.Parse(args); err != nil {
@@ -188,8 +215,14 @@ func runDLQReplay(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		fs.Usage()
 		return 2
 	}
+	// A Kafka partition is an int32; int32(*partition) would silently wrap.
+	if partitionSet && *partition > math.MaxInt32 {
+		fmt.Fprintf(stderr, "error: -partition must be <= %d\n", math.MaxInt32)
+		fs.Usage()
+		return 2
+	}
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokerList...))
+	cl, err := newClient(brokerList, *useTLS)
 	if err != nil {
 		fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
 		return 1

@@ -2,10 +2,8 @@
 package dlq
 
 import (
-	"cmp"
 	"context"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -204,25 +202,16 @@ func read(ctx context.Context, cl *kgo.Client, topic string, from, to map[int32]
 	return nil
 }
 
-// List returns every DLQ record from the start to the end offsets at call time,
-// ordered by partition then offset.
-func List(ctx context.Context, cl *kgo.Client, topic string) ([]Entry, error) {
+// List calls fn with every DLQ record from the start to the end offsets at call
+// time, as each arrives, so a large DLQ is never held in memory. Order is by
+// offset within a partition; partitions interleave. List stops at the first
+// error from fn and returns it.
+func List(ctx context.Context, cl *kgo.Client, topic string, fn func(Entry) error) error {
 	start, end, err := bounds(ctx, cl, topic)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var out []Entry
-	err = read(ctx, cl, topic, start, end, func(r *kgo.Record) error {
-		out = append(out, decode(r))
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	slices.SortFunc(out, func(a, b Entry) int {
-		return cmp.Or(cmp.Compare(a.Record.Partition, b.Record.Partition), cmp.Compare(a.Record.Offset, b.Record.Offset))
-	})
-	return out, nil
+	return read(ctx, cl, topic, start, end, func(r *kgo.Record) error { return fn(decode(r)) })
 }
 
 // replay re-produces e's record to its source topic with the original key,

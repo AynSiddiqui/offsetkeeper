@@ -1,6 +1,7 @@
 package dlq
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -91,7 +92,12 @@ func TestList(t *testing.T) {
 
 	ctx, cancel := testCtx(t)
 	defer cancel()
-	if got, err := List(ctx, cl, topic); err != nil || len(got) != 0 {
+	collect := func(topic string) ([]Entry, error) {
+		var es []Entry
+		err := List(ctx, cl, topic, func(e Entry) error { es = append(es, e); return nil })
+		return es, err
+	}
+	if got, err := collect(topic); err != nil || len(got) != 0 {
 		t.Fatalf("empty topic: %v, %v", got, err)
 	}
 
@@ -107,10 +113,21 @@ func TestList(t *testing.T) {
 	}
 	testenv.Produce(t, brokers, rs...)
 
-	got, err := List(ctx, cl, topic)
+	got, err := collect(topic)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Partitions interleave as they arrive; offsets within one are in order.
+	last := map[int32]int64{0: -1, 1: -1}
+	for _, e := range got {
+		if e.Record.Offset != last[e.Record.Partition]+1 {
+			t.Errorf("partition %d: offset %d after %d, want in order", e.Record.Partition, e.Record.Offset, last[e.Record.Partition])
+		}
+		last[e.Record.Partition] = e.Record.Offset
+	}
+	slices.SortFunc(got, func(a, b Entry) int {
+		return cmp.Or(cmp.Compare(a.Record.Partition, b.Record.Partition), cmp.Compare(a.Record.Offset, b.Record.Offset))
+	})
 	if len(got) != 6 {
 		t.Fatalf("List returned %d entries, want 6", len(got))
 	}
@@ -125,14 +142,18 @@ func TestList(t *testing.T) {
 	}
 
 	// read removes its partitions again, so the client can be reused.
-	again, err := List(ctx, cl, topic)
-	if err != nil || !slices.EqualFunc(got, again, func(a, b Entry) bool {
-		return a.Record.Offset == b.Record.Offset && a.Record.Partition == b.Record.Partition
-	}) {
+	again, err := collect(topic)
+	if err != nil || len(again) != len(got) {
 		t.Errorf("second List = %d entries, %v", len(again), err)
 	}
 
-	if _, err := List(ctx, cl, topic+".missing"); err == nil {
+	// fn runs as records arrive: its error stops List after the first entry.
+	stop, calls := errors.New("stop"), 0
+	if err := List(ctx, cl, topic, func(Entry) error { calls++; return stop }); !errors.Is(err, stop) || calls != 1 {
+		t.Errorf("List with a failing fn = %v after %d calls, want the fn error after 1", err, calls)
+	}
+
+	if _, err := collect(topic + ".missing"); err == nil {
 		t.Error("List of a missing topic returned nil")
 	}
 }
