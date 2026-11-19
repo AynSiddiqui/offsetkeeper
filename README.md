@@ -1,7 +1,7 @@
 # offsetkeeper
 
 A Kafka consumer runtime for Go on franz-go with retries and a dead-letter
-queue that cannot commit past a failed record.
+queue that cannot commit past an unsettled record.
 
 **Status:** pre-release, not yet tagged.
 
@@ -13,7 +13,7 @@ queue that cannot commit past a failed record.
 - Go ≥1.26.
 - A running Kafka cluster (or wire-compatible broker such as Redpanda).
 - Source topics must be pre-created.
-- The DLQ topic must be pre-created as a plain, non-compacted, non-transactional topic with `max.message.bytes` ≥ source message size plus headers (~4 KiB).
+- The DLQ topic must be pre-created as a plain, non-compacted, non-transactional topic with `max.message.bytes` and producer `ProducerBatchMaxBytes` large enough to fit source key, value and headers plus ~4.2 KiB of offsetkeeper headers.
 
 ## Quickstart
 
@@ -57,14 +57,14 @@ See [CONTRACT.md](CONTRACT.md) for the full contract and test suite.
 - **At-least-once delivery.** Handlers may see a record more than once and must be idempotent.
 - **Per-partition order.** Records are handled sequentially in offset order within a partition.
 - **Confirmed DLQ before commit.** A record that still fails after its retries goes to the DLQ, and its source offset is committed only after the broker acks the DLQ write.
-- **No commit past failure.** Offsets never advance beyond an unsettled or failed record.
-- **Rebalance timeout.** Handlers must finish (retries included) within the rebalance timeout.
+- **No commit past failure.** Offsets never advance beyond an unsettled record (a record that failed without a DLQ, or whose DLQ write failed).
+- **Rebalance timeout.** Handlers and retries must finish within the rebalance timeout if a rebalance begins mid-batch.
 
 ## Operating
 
-- **Topics & DLQ:** Pre-create source topics. DLQs must be plain, non-compacted, non-transactional topics with room for source records plus 4 KiB headers.
-- **Time budget:** Budget serial handlers, retries, backoffs, DLQ writes and commits to finish within the group rebalance timeout.
-- **Replay safety:** Run only one `dlq replay` at a time per DLQ. Replay may change record partitions and can duplicate records after a crash; handlers must be idempotent.
+- **Topics & sizing:** Pre-create source topics. A DLQ record equals source key+value+headers plus ~4.2 KiB of offsetkeeper headers; the DLQ topic `max.message.bytes` and producer `ProducerBatchMaxBytes` must both fit it.
+- **Time budget:** Budget serial handlers, retries, backoffs, DLQ writes and commits to finish within the group rebalance timeout if a rebalance begins mid-batch.
+- **Replay limits:** Run one `dlq replay` at a time per DLQ. Replay routes via the partitioner and strips reserved `offsetkeeper.` headers. Subject to broker retention and group offset expiry (which can cause duplicates); `ReplayOne` does not advance the bulk checkpoint. An invisible tail offset waits until cancelled (Ctrl-C).
 - **CLI flags:** The CLI connects via plaintext by default, or with `-tls` using system roots; SASL is not supported.
 
 ## When not to use
@@ -78,7 +78,21 @@ See [CONTRACT.md](CONTRACT.md) for the full contract and test suite.
 Install the CLI tool:
 
 ```bash
-go install github.com/AynSiddiqui/offsetkeeper/cmd/offsetkeeper@latest
+# Before the first tag, from a checkout:
+go install ./cmd/offsetkeeper
+
+# After the v0.1.0 release tag:
+go install github.com/AynSiddiqui/offsetkeeper/cmd/offsetkeeper@v0.1.0
+```
+
+### Local demo
+
+```bash
+docker compose up -d kafka
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic my-topic --partitions 1 --replication-factor 1
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic my-topic.dlq --partitions 1 --replication-factor 1
+docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic my-topic <<< "hello offsetkeeper"
+go run .
 ```
 
 List records in a dead-letter queue (streams rows as they are read; free-text columns are escaped):

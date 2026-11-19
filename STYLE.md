@@ -32,9 +32,9 @@ Source: [Code Review Comments](https://go.dev/wiki/CodeReviewComments), [Google 
 Source: [Google best practices: error handling](https://google.github.io/styleguide/go/best-practices.html#error-handling), [Uber: error wrapping](https://github.com/uber-go/guide/blob/master/style.md#error-wrapping), [Effective Go](https://go.dev/doc/effective_go#errors) (frozen since 2009, so only the basics).
 
 ## Context
-- `ctx context.Context` is the first parameter of every function that blocks or does I/O.
+- `ctx context.Context` is the first parameter of every function that blocks or does I/O. Exception: `Close()` methods (such as `Publisher.Close`) do not take a context, matching standard Go `io.Closer` conventions.
 - Never store a context in a struct, never define a custom context type, never put `ctx` in an options struct.
-- `context.Background()` appears only in `main` and in cleanup that must outlive cancellation (use `context.WithoutCancel` plus a timeout).
+- `context.Background()` appears only in `main`, in test helpers deriving bounded test contexts (such as `testCtx` using `context.WithTimeout`), and in cleanup that must outlive cancellation (use `context.WithoutCancel` plus a timeout).
 - Tests derive `ctx` with `context.WithTimeout`, never an unbounded one.
 
 Source: [Code Review Comments: contexts](https://go.dev/wiki/CodeReviewComments#contexts), [Google decisions: contexts](https://google.github.io/styleguide/go/decisions.html#contexts).
@@ -52,7 +52,7 @@ Source: [Uber: don't fire-and-forget goroutines](https://github.com/uber-go/guid
 ## Logging
 - `log/slog` only, through the `Config.Logger` (nil means `slog.Default()`). No `log`, no `fmt.Print*` in the library.
 - Structured attributes (`"topic"`, `"partition"`, `"offset"`, `"attempt"`, `"err"`), never string-built messages.
-- Log at the point you handle an error, not where you return it. Exception: per-attempt `Warn` logs on handler retry or dead-letter produce are deliberate operator observability. No secrets or record values in logs.
+- Log at the point you handle an error, not where you return it. Exception: per-attempt `Warn` logs on handler retry or dead-letter produce provide operator observability, and recovered handler panics are logged at `Error`. No secrets or record values in logs.
 
 Source: [log/slog](https://pkg.go.dev/log/slog), [Google best practices: error handling (log sparingly)](https://google.github.io/styleguide/go/best-practices.html#error-handling).
 
@@ -66,7 +66,7 @@ Source: [Google best practices: option structure](https://google.github.io/style
 
 ## Globals
 - No package-level mutable state, no `init()` side effects, no flags registered by the library (only `package main` defines flags).
-- The only allowed globals are constants, immutable values, and documented test hooks in `export_test.go` (such as `dlqTimeout`).
+- The only allowed globals are constants, immutable values, and documented test hooks defined in production files and set via `export_test.go` (such as `dlqTimeout`, defined in `dlq.go` and set via `export_test.go`).
 - Inject clocks and clients through struct fields.
 
 Source: [Google decisions: global state](https://google.github.io/styleguide/go/decisions.html#global-state), [Uber: avoid mutable globals](https://github.com/uber-go/guide/blob/master/style.md#avoid-mutable-globals), [Uber: avoid init()](https://github.com/uber-go/guide/blob/master/style.md#avoid-init).
@@ -81,8 +81,8 @@ Source: [Google decisions: global state](https://google.github.io/styleguide/go/
 Source: [Go Doc Comments](https://go.dev/doc/comment), [Google best practices: examples](https://google.github.io/styleguide/go/best-practices.html#examples).
 
 ## Tests
-- Table tests where cases differ only by data; one `Test` per contract guarantee, named in `CONTRACT.md`.
-- Assertions stay in the `Test` function. Helpers call `t.Helper()`, do setup and cleanup (`t.Cleanup`), and use `t.Fatal` only for setup.
+- Table tests where cases differ only by data; at least one `Test` per contract guarantee, named in `CONTRACT.md`.
+- Assertions stay in the `Test` function. Helpers call `t.Helper()`, do setup and cleanup (`t.Cleanup`), and use `t.Fatal` only for setup (exception: `testenv.Eventually` may call `t.Fatalf` on an assertion timeout).
 - Failure messages: `F(input) = got, want want`. Use `t.Error` to keep checking; `t.Fatal` only when later checks are meaningless. `cmp.Diff`-style output, no assertion libraries.
 - Unique topic and group per test (`internal/testenv`). No `time.Sleep`: poll to a deadline.
 - Run with `-race -count=1`. Default is kfake; real-broker suites run in CI and on request (`OFFSETKEEPER_BROKERS`).
@@ -91,7 +91,7 @@ Source: [Go Doc Comments](https://go.dev/doc/comment), [Google best practices: e
 Source: [Google decisions: test failure messages](https://google.github.io/styleguide/go/decisions.html#useful-test-failures), [Google best practices: test helpers](https://google.github.io/styleguide/go/best-practices.html#test-helpers), [OpenTelemetry-Go CONTRIBUTING: tests](https://github.com/open-telemetry/opentelemetry-go/blob/main/CONTRIBUTING.md).
 
 ## Dependencies
-- Stdlib and franz-go only (`kgo`, `kadm`, `kfake`). No testify, no testcontainers, no logging or metrics frameworks.
+- Stdlib and franz-go only (direct: `kgo`, `kadm`, `kfake`, `kmsg`). No testify, no testcontainers, no logging or metrics frameworks.
 - A new dependency needs an issue first: what the stdlib cannot do, its maintenance state, its transitive cost.
 - Keep `go.mod` tidy; update with `go get` then `go mod tidy`; never hand-edit `// indirect`. No `vendor/`.
 - `govulncheck` runs in CI and must pass.
@@ -109,7 +109,7 @@ Source: [Uber: performance](https://github.com/uber-go/guide/blob/master/style.m
 
 ## Reliability rules for this library
 These come from CONTRACT.md and are never traded for convenience.
-1. **Never commit past unsettled.** An offset is committed only for a contiguous prefix of settled records (handled without error, or DLQ-acked) per partition. A failed, skipped or in-flight record blocks its partition's commit.
+1. **Never commit past unsettled.** An offset is committed only for a contiguous prefix of settled records (handled without error, or DLQ-acked) per partition. A failed record without DLQ, a skipped record, or an in-flight record blocks its partition's commit.
 2. **DLQ write is acked before the source commit.** If the DLQ cannot be written, `Run` stops with an error; it never drops the record.
 3. **Every wait has a `ctx` or a timeout.** Network calls, commits, DLQ produce, retries and shutdown. Commits ignore the run `ctx` on shutdown, so they carry their own timeout.
 4. **Handlers may see a record twice.** Document it; never promise exactly-once.

@@ -41,14 +41,12 @@ BREAKING CHANGE: what breaks and how to migrate.   (only when it does)
 ```
 
 - **Types:** `feat` `fix` `docs` `test` `refactor` `perf` `build` `ci` `chore` `revert`.
-- **Scope** is the Go package: `feat(dlq): ...`, `fix(testenv): ...`. For the root
-  package omit the scope or write `offsetkeeper`.
+- **Scope** is the Go package path's last element: `cmd` (for `cmd/offsetkeeper`), `dlq`, `testenv`, or `offsetkeeper` (or omit for the root package); `deps` is reserved for Dependabot.
 - **Breaking:** add `!` before the colon (`feat(dlq)!: ...`) and a `BREAKING CHANGE:` footer.
-- Subject: imperative, lowercase after the colon, no trailing period, ≤72
-  characters ("fix(dlq): wait for ack before committing").
+- Header: imperative, lowercase after the colon, no trailing period, ≤72 characters total ("fix(dlq): wait for ack before committing").
 - Body: wrap at 72, explain *why*, not what the diff shows. Include `benchstat`
   output for `perf`. Reference issues with `Fixes #n` or `Updates #n`.
-- Every commit builds and passes tests, so `git bisect` always works.
+- Every commit that contains Go packages builds and passes tests, so `git bisect` always works.
 - No AI attribution lines: no `Co-Authored-By`, no "Generated with".
 - No sign-off (DCO) needed: inbound contributions are under the Apache-2.0
   license, section 5.
@@ -108,26 +106,27 @@ Full rules and sources: [STYLE.md](STYLE.md). The short list:
   least one minor release before removal in a major.
 - **Before any release that touches exported API**, run an API diff against the
   last tag and paste the output in the release PR:
-  ```
+  ```bash
   go install golang.org/x/exp/cmd/apidiff@latest
   go install golang.org/x/exp/cmd/gorelease@latest
-  gorelease -base=<last tag>     # suggests the version and flags incompatible changes
+  gorelease -base="$PREV_TAG"     # suggests the version and flags incompatible changes
   ```
-  For the first release tag (`v0.1.0`), run `gorelease -version=v0.1.0` without a `-base` flag.
+  For the first release tag (`v0.1.0`), run `gorelease -base=none -version=v0.1.0`.
   An incompatible change needs a major bump (or `0.y` minor while pre-1.0)
   and a `BREAKING CHANGE:` footer.
-- Release steps: green CI on `main`, update `CHANGELOG.md`, tag `vX.Y.Z`
+- Release steps: green CI on `main`, stage dated `## v0.1.0 - YYYY-MM-DD` changelog section and README status, update `CHANGELOG.md`, tag `vX.Y.Z`
   (annotated), push the tag, create the GitHub release from the changelog
   section. Releases are not signed and ship no SBOM.
 - **Post-tag smoke test** in a fresh module without `replace`:
   ```bash
-  mkdir /tmp/smoke && cd /tmp/smoke
-  go mod init smoke
+  SMOKE_DIR=$(mktemp -d)
+  cd "$SMOKE_DIR"
+  go mod init example.com/smoke
   go get github.com/AynSiddiqui/offsetkeeper@v0.1.0
-  # Build the README quickstart against the published module
+  awk '/^```go/{flag=1; next} /^```/{if(flag) exit} flag{print}' "$REPO_ROOT/README.md" > main.go
   go build .
-  # Verify CLI install
   go install github.com/AynSiddiqui/offsetkeeper/cmd/offsetkeeper@v0.1.0
+  rm -rf "$SMOKE_DIR"
   ```
 - **pkg.go.dev check**: verify documentation and example rendering at `https://pkg.go.dev/github.com/AynSiddiqui/offsetkeeper@v0.1.0`.
 - **GitHub settings checklist**:

@@ -18,7 +18,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](ht
 ### Fixed
 
 - Handlers receive a per-attempt shallow copy of `kgo.Record` so in-handler modifications or re-produces cannot move committed offsets or overwrite original DLQ source headers (`TestHandlerCannotMoveCommit`, `TestDLQNamesOriginalSource`). Key, Value, and Headers backing bytes are shared and must not be mutated in place.
-- Cap DLQ `offsetkeeper.error` header at 4 KiB with a truncation marker to prevent oversized errors from failing broker produce and permanently halting consumption (`TestDLQErrorHeaderCapped`).
+- Cap DLQ `offsetkeeper.error` header at 4 KiB with a truncation marker to prevent oversized error text from failing broker produce and permanently halting consumption (`TestDLQErrorHeaderCapped`).
 - Emit a `Warn` log (`offsetkeeper: dead-lettered`) on each dead-letter write with topic, partition, offset, DLQ topic, and attempt count.
 - Reject configurations where `DLQTopic` is included in `Topics` to prevent recursive dead-letter loops.
 - Bound CLI `-partition` flag to `math.MaxInt32` before client creation to avoid integer overflow and unintended partition 0 operations.
