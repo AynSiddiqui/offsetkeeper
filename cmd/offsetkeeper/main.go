@@ -160,24 +160,30 @@ func runDLQList(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	defer cl.Close()
 
 	// The header waits for the first row or a clean finish, so a failed List
-	// (missing topic) prints no header.
+	// (missing topic) prints no header. A failed write stops the listing.
 	headerDone := false
-	header := func() {
-		if !headerDone {
-			fmt.Fprintln(stdout, "partition\toffset\tsource_topic\tsource_partition\tsource_offset\tattempts\terror")
-			headerDone = true
+	header := func() error {
+		if headerDone {
+			return nil
 		}
+		headerDone = true
+		_, err := fmt.Fprintln(stdout, "partition\toffset\tsource_topic\tsource_partition\tsource_offset\tattempts\terror")
+		return err
 	}
 	err = dlq.List(ctx, cl, *topic, func(e dlq.Entry) error {
-		header()
-		fmt.Fprintf(stdout, "%d\t%d\t%s\t%d\t%d\t%d\t%s\n", e.Record.Partition, e.Record.Offset, escape(e.SourceTopic), e.SourcePartition, e.SourceOffset, e.Attempts, escape(e.Err))
-		return nil
+		if err := header(); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(stdout, "%d\t%d\t%s\t%d\t%d\t%d\t%s\n", e.Record.Partition, e.Record.Offset, escape(e.SourceTopic), e.SourcePartition, e.SourceOffset, e.Attempts, escape(e.Err))
+		return err
 	})
+	if err == nil {
+		err = header()
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
 		return 1
 	}
-	header()
 	return 0
 }
 
@@ -234,8 +240,7 @@ func runDLQReplay(ctx context.Context, args []string, stdout, stderr io.Writer) 
 			fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "replayed %d record(s)\n", 1)
-		return 0
+		return printReplayed(stdout, stderr, 1)
 	}
 
 	n, err := dlq.ReplayAll(ctx, cl, *topic)
@@ -243,6 +248,13 @@ func runDLQReplay(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "replayed %d record(s)\n", n)
+	return printReplayed(stdout, stderr, n)
+}
+
+func printReplayed(stdout, stderr io.Writer, n int) int {
+	if _, err := fmt.Fprintf(stdout, "replayed %d record(s)\n", n); err != nil {
+		fmt.Fprintf(stderr, "offsetkeeper: %v\n", err)
+		return 1
+	}
 	return 0
 }

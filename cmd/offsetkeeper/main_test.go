@@ -305,3 +305,44 @@ func TestTLSFlag(t *testing.T) {
 		cancel()
 	}
 }
+
+// failWriter accepts ok writes, then fails every one.
+type failWriter struct{ ok int }
+
+func (w *failWriter) Write(p []byte) (int, error) {
+	if w.ok--; w.ok < 0 {
+		return 0, errors.New("disk full")
+	}
+	return len(p), nil
+}
+
+// A stdout that rejects writes is a failed command, not a silent success.
+func TestWriteErrorsExitNonzero(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	brokers := testenv.Brokers(t)
+	empty := testenv.Topic(t, brokers, 1)
+	full := testenv.Topic(t, brokers, 1)
+	src := testenv.Topic(t, brokers, 1) // replay target
+	testenv.Produce(t, brokers, &kgo.Record{Topic: full, Headers: dlq.Headers(&kgo.Record{Topic: src}, 1, errors.New("boom"))})
+	b := strings.Join(brokers, ",")
+
+	for name, tc := range map[string]struct {
+		ok   int // writes that succeed before the failure
+		args []string
+	}{
+		"list header (empty topic)": {0, []string{"dlq", "list", "-brokers", b, "-topic", empty}},
+		"list header (first row)":   {0, []string{"dlq", "list", "-brokers", b, "-topic", full}},
+		"list row":                  {1, []string{"dlq", "list", "-brokers", b, "-topic", full}},
+		"replay summary (all)":      {0, []string{"dlq", "replay", "-brokers", b, "-topic", empty}},
+		"replay summary (one)":      {0, []string{"dlq", "replay", "-brokers", b, "-topic", full, "-partition", "0", "-offset", "0"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := tc.args
+			var stderr bytes.Buffer
+			if code := run(ctx, args, &failWriter{ok: tc.ok}, &stderr); code != 1 || !strings.Contains(stderr.String(), "disk full") {
+				t.Fatalf("run(%v) = %d, stderr %q; want exit 1 and the write error", args, code, stderr.String())
+			}
+		})
+	}
+}
