@@ -80,8 +80,9 @@ func parseBrokers(raw string) []string {
 	return list
 }
 
-// newClient connects to brokers, over TLS with the system root CAs when useTLS
-// is set. There is no SASL; the CLI is for clusters that need nothing else.
+// newClient creates a client for brokers, over TLS with the system root CAs when
+// useTLS is set. It does not dial: the first operation does, so a bad address
+// shows up there. There is no SASL; the CLI is for clusters that need nothing else.
 func newClient(brokers []string, useTLS bool) (*kgo.Client, error) {
 	opts := []kgo.Opt{kgo.SeedBrokers(brokers...)}
 	if useTLS {

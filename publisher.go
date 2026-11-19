@@ -24,7 +24,8 @@ func NewPublisher(opts ...kgo.Opt) (*Publisher, error) {
 	return &Publisher{cl}, nil
 }
 
-// Publish returns only after every record is acked, or the first error.
+// Publish waits for the results of all records, then returns nil if every one
+// was acked, or the first error.
 // It sets Partition, Offset, Timestamp and related fields on rs, as kgo does, so
 // pass a record you no longer need to read as it was.
 func (p *Publisher) Publish(ctx context.Context, rs ...*kgo.Record) error {

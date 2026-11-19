@@ -1,9 +1,10 @@
 // Package offsetkeeper is a Kafka consumer runtime on franz-go: at-least-once
 // delivery, per-partition order, bounded retries and a confirmed dead-letter
-// queue. It never commits an offset past a record that is unsettled: one that
-// has failed, was skipped, or is still being handled.
+// queue. It never commits an offset past a record that is unsettled: one still
+// being handled, skipped, or failed. A failed record settles only when its
+// dead-letter write is acked.
 //
-// The guarantees are in CONTRACT.md; each one names the test that proves it.
+// The guarantees are in [CONTRACT.md]; each one names the test that proves it.
 //
 // # How a batch is committed
 //
@@ -13,9 +14,9 @@
 // DLQ). When every goroutine is done, Run commits the last record of each
 // partition's contiguous settled prefix, then calls AllowRebalance and polls
 // again. On cancel no new record is started, the settled prefix is committed
-// and Run returns nil (or the commit error). If a record cannot be settled (no DLQ, or the DLQ write
-// failed), the other partitions are cancelled, their settled prefixes are
-// committed, and Run returns the error.
+// and Run returns nil (or the commit error). If a record cannot be settled (no
+// DLQ, or the DLQ write failed), the other partitions are cancelled, their
+// settled prefixes are committed, and Run returns the error.
 //
 // Example:
 //
@@ -28,4 +29,6 @@
 //			return process(ctx, r.Value) // nil settles; an error retries, then dead-letters
 //		},
 //	})
+//
+// [CONTRACT.md]: https://github.com/AynSiddiqui/offsetkeeper/blob/main/CONTRACT.md
 package offsetkeeper

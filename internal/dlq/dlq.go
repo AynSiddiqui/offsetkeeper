@@ -13,7 +13,7 @@ import (
 )
 
 // Header names added to every dead-lettered record. Values are decimal strings
-// except the error text.
+// except the source topic and the error text.
 const (
 	HeaderSourceTopic     = "offsetkeeper.source.topic"
 	HeaderSourcePartition = "offsetkeeper.source.partition"
@@ -79,8 +79,8 @@ func decode(r *kgo.Record) Entry {
 		case HeaderSourceTopic:
 			e.SourceTopic = v
 		case HeaderSourcePartition:
-			// ParseInt and Atoi return the saturated maximum on a range error; a
-			// header that does not parse must decode to zero, as Entry documents.
+			// ParseInt and Atoi return the upper or lower bound on overflow or
+			// underflow; a header that does not parse must decode to zero, as Entry documents.
 			n, err := strconv.ParseInt(v, 10, 32)
 			if err != nil {
 				n = 0
