@@ -1027,29 +1027,36 @@ func TestHandlerGoexitStopsRun(t *testing.T) {
 }
 
 // One partition fails while the other is healthy: Run's error exit still commits
-// the healthy partition's settled prefix.
+// the healthy partition's settled prefix, and nothing past it.
 func TestErrorExitCommitsOtherPartitions(t *testing.T) {
 	e, ctx := newEnv(t, 2), testCtx(t)
 	e.produce(t, "r", 5)
 	var c calls
 	var p1Done atomic.Int64 // records partition 1 returned nil for
-	var lastOK atomic.Int64 // highest such offset
-	lastOK.Store(-1)
+	p1Settled := make(chan struct{})
 	r := start(t, ctx, e.cfg(func(ctx context.Context, rec *kgo.Record) error {
 		c.add(rec, "")
 		switch {
 		case rec.Partition == 1 && rec.Offset < 2:
-			lastOK.Store(rec.Offset)
-			p1Done.Add(1)
+			if p1Done.Add(1) == 2 {
+				close(p1Settled)
+			}
 			return nil
 		case rec.Partition == 1:
 			<-ctx.Done() // stays unsettled until the failure cancels the batch
 			return ctx.Err()
 		case rec.Offset == 2:
 			// Fail only after partition 1 has settled two records, so the prefix
-			// to commit exists; bounded so a split poll fails loudly, not by hanging.
-			testenv.Eventually(t, 10*time.Second, func() bool { return p1Done.Load() >= 2 }, "partition 1 to settle 2 records (are both partitions in one poll?)")
-			return errBoom
+			// to commit exists. t.Fatal is not allowed here (wrong goroutine), so
+			// a split poll becomes an error the main goroutine reports.
+			select {
+			case <-p1Settled:
+				return errBoom
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(10 * time.Second):
+				return errors.New("partition 1 did not settle 2 records (are both partitions in one poll?)")
+			}
 		}
 		return nil
 	}))
@@ -1061,8 +1068,9 @@ func TestErrorExitCommitsOtherPartitions(t *testing.T) {
 	if got[0] != 2 {
 		t.Errorf("failing partition committed %d, want 2", got[0])
 	}
-	if ok := lastOK.Load(); got[1] < ok+1 || got[1] < 2 {
-		t.Errorf("healthy partition committed %d, want >= %d (its settled prefix)", got[1], ok+1)
+	// Exactly 2: offset 2 of partition 1 was still in flight, so it must not be committed.
+	if got[1] != 2 {
+		t.Errorf("healthy partition committed %d, want exactly 2 (its settled prefix)", got[1])
 	}
 }
 

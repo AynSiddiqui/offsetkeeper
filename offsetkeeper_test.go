@@ -3,13 +3,17 @@ package offsetkeeper
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/AynSiddiqui/offsetkeeper/internal/testenv"
 )
 
 func validConfig() Config {
@@ -80,5 +84,64 @@ func TestPermanent(t *testing.T) {
 	var ce *customErr
 	if !errors.As(Permanent(&customErr{}), &ce) {
 		t.Fatal("errors.As cannot see the wrapped type")
+	}
+}
+
+// kgo may hand one partition's records out in several chunks; batch must still
+// run one goroutine per partition, or a later chunk would be handled and
+// committed past an earlier chunk's failure.
+func TestBatchSplitFetchSamePartition(t *testing.T) {
+	brokers := testenv.Brokers(t)
+	topic, group := testenv.Topic(t, brokers, 1), testenv.Group(t)
+	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.ConsumerGroup(group), kgo.DisableAutoCommit())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	chunk := func(offsets ...int64) kgo.Fetch {
+		fp := kgo.FetchPartition{Partition: 0}
+		for _, o := range offsets {
+			fp.Records = append(fp.Records, &kgo.Record{Topic: topic, Partition: 0, Offset: o})
+		}
+		return kgo.Fetch{Topics: []kgo.FetchTopic{{Topic: topic, Partitions: []kgo.FetchPartition{fp}}}}
+	}
+	fetches := kgo.Fetches{chunk(0, 1), chunk(2, 3)}
+	errBoom := errors.New("boom")
+
+	var handled sync.Map // offset -> true
+	later := make(chan struct{})
+	var once sync.Once
+	w := &worker{cl: cl, cfg: Config{
+		MaxAttempts: 1, Backoff: time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Handler: func(_ context.Context, r *kgo.Record) error {
+			handled.Store(r.Offset, true)
+			if r.Offset >= 2 {
+				once.Do(func() { close(later) })
+			}
+			if r.Offset == 1 {
+				// Give a concurrent goroutine for the second chunk time to run past us.
+				select {
+				case <-later:
+				case <-time.After(300 * time.Millisecond):
+				}
+				return errBoom
+			}
+			return nil
+		},
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := w.batch(ctx, fetches); !errors.Is(err, errBoom) {
+		t.Fatalf("batch returned %v, want the handler error", err)
+	}
+	for _, o := range []int64{2, 3} {
+		if _, ok := handled.Load(o); ok {
+			t.Errorf("offset %d was handled though offset 1 failed", o)
+		}
+	}
+	if got := testenv.Committed(t, brokers, group, topic)[0]; got != 1 {
+		t.Errorf("committed %d, want 1 (only offset 0 settled)", got)
 	}
 }
