@@ -278,6 +278,8 @@ func (w *worker) settle(ctx context.Context, r *kgo.Record) (bool, error) {
 		}
 		return false, errors.Join(herr, derr)
 	}
+	// Without this line a MaxAttempts=1 failure is indistinguishable from a dropped record.
+	w.cfg.Logger.Warn("offsetkeeper: dead-lettered", "topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "dlq_topic", w.cfg.DLQTopic, "attempts", attempts)
 	return true, nil
 }
 

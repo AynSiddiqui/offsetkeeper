@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -588,6 +589,24 @@ func shutdownDrains(t *testing.T, withDLQ bool) {
 }
 
 // eventLog records produce acks and OffsetCommit writes in the order they happen.
+// syncBuf is a bytes.Buffer safe for a slog handler used by several goroutines.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 type eventLog struct {
 	mu sync.Mutex
 	xs []string
@@ -630,6 +649,8 @@ func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
 	})
 	cfg.DLQTopic = dlqTopic
 	cfg.ClientOpts = []kgo.Opt{kgo.WithHooks(log)}
+	logs := &syncBuf{}
+	cfg.Logger = slog.New(slog.NewJSONHandler(logs, nil))
 	r := start(t, ctx, cfg)
 	r.until(t, "source drained", func() bool { return e.drained(t) })
 
@@ -667,6 +688,23 @@ func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
 	}
 	if got, _ := header(d, "offsetkeeper.error"); !strings.Contains(got, "kaboom") {
 		t.Errorf("DLQ header offsetkeeper.error = %q, want it to contain the handler error", got)
+	}
+
+	// The dead-letter is logged once, before the commit, so it is there by now.
+	var lines []map[string]any
+	for l := range strings.SplitSeq(logs.String(), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(l), &m) == nil && m["msg"] == "offsetkeeper: dead-lettered" {
+			lines = append(lines, m)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("%d dead-lettered log lines, want 1; log:\n%s", len(lines), logs)
+	}
+	for k, want := range map[string]any{"level": "WARN", "topic": e.topic, "partition": 0.0, "offset": 1.0, "dlq_topic": dlqTopic, "attempts": 3.0} {
+		if lines[0][k] != want {
+			t.Errorf("dead-lettered log %s = %v, want %v", k, lines[0][k], want)
+		}
 	}
 }
 
