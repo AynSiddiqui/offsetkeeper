@@ -39,6 +39,8 @@ const (
 // sequentially, in offset order, within one partition, so state shared across
 // records needs its own locking. A record can be delivered more than once (a
 // crash or rebalance before its commit, a replay), so make the handler idempotent.
+// Handlers must honour ctx: on shutdown Run waits for in-flight handlers to
+// return without an internal drain timeout.
 type Handler func(ctx context.Context, r *kgo.Record) error
 
 // Config configures Run. Brokers, Group, Topics and Handler are required.
@@ -70,6 +72,8 @@ type Config struct {
 	// Producer options are not protected: kgo.RequiredAcks(kgo.LeaderAck()) or
 	// kgo.NoAck(), and kgo.DisableIdempotentWrite, weaken the DLQ produce and void
 	// the guarantee that a dead letter is durable before its source is committed.
+	// Records above ~1 MB need kgo.ProducerBatchMaxBytes in ClientOpts for the
+	// DLQ write, as franz-go defaults to ~1 MB producer batches.
 	ClientOpts []kgo.Opt
 }
 
@@ -126,7 +130,10 @@ type partResult struct {
 
 // Run consumes until ctx is cancelled (returns nil) or a record cannot be settled
 // (returns the error). If the final commit fails, that error is returned even
-// after a cancel. It creates and closes its own kgo.Client and validates cfg first.
+// after a cancel. On shutdown, Run waits for in-flight handlers to return before
+// committing (there is no drain timeout; handlers must honour ctx). A deleted
+// topic is logged as a fetch error and Run keeps running. It creates and closes
+// its own kgo.Client and validates cfg first.
 func Run(ctx context.Context, cfg Config) error {
 	cfg, err := cfg.withDefaults()
 	if err != nil {

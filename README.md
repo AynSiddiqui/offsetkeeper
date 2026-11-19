@@ -62,8 +62,8 @@ See [CONTRACT.md](CONTRACT.md) for the full contract and test suite.
 
 ## Operating
 
-- **Topics & sizing:** Pre-create source topics. A DLQ record equals source key+value+headers plus ~4.2 KiB of offsetkeeper headers; the DLQ topic `max.message.bytes` and producer `ProducerBatchMaxBytes` must both fit it.
-- **Time budget:** Budget serial handlers, retries, backoffs, DLQ writes and commits to finish within the group rebalance timeout if a rebalance begins mid-batch.
+- **Topics & sizing:** Pre-create source topics. A DLQ record equals source key+value+headers plus ~4.2 KiB of offsetkeeper headers; the DLQ topic `max.message.bytes` and producer `ProducerBatchMaxBytes` must both fit it. Records above ~1 MB need `kgo.ProducerBatchMaxBytes` in `ClientOpts` for the DLQ write (franz-go default producer batch limit is ~1 MB). If a consumed topic is deleted while running, it is logged as a fetch error and `Run` keeps running.
+- **Time budget:** Budget serial handlers, retries, backoffs, DLQ writes and commits to finish within the group rebalance timeout if a rebalance begins mid-batch. On shutdown, `Run` waits for in-flight handlers to return before committing (no internal drain timeout); handlers must honour `ctx`.
 - **Replay limits:** Run one `dlq replay` at a time per DLQ. Replay routes via the partitioner and strips reserved `offsetkeeper.` headers. Subject to broker retention and group offset expiry (which can cause duplicates); `ReplayOne` does not advance the bulk checkpoint. An invisible tail offset waits until cancelled (Ctrl-C).
 - **CLI flags:** The CLI connects via plaintext by default, or with `-tls` using system roots; SASL is not supported.
 
