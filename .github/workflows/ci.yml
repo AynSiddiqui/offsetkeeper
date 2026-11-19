@@ -1,0 +1,65 @@
+name: ci
+on:
+  push: {branches: [main]}
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.26.x", "1.27.x"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with: {go-version: "${{ matrix.go }}"}
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with: {go-version: "1.27.x"}
+      - uses: golangci/golangci-lint-action@v9.3.0
+        with: {version: v2.15.0}
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: golang/govulncheck-action@v1.1.0
+        with: {go-version-input: "1.27.x", go-package: ./...}
+  kafka:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with: {go-version: "1.27.x"}
+      - run: docker compose up -d kafka
+      - run: go test -race -count=1 ./...
+        env: {OFFSETKEEPER_BROKERS: "localhost:9092"}
+  redpanda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with: {go-version: "1.27.x"}
+      - run: docker compose up -d redpanda
+      - run: go test -race -count=1 ./...
+        env: {OFFSETKEEPER_BROKERS: "localhost:19092"}
+  quickstart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with: {go-version: "1.27.x"}
+      - run: |
+          DIR=$(mktemp -d)
+          cd "$DIR"
+          go mod init example.com/qs
+          go mod edit -replace github.com/AynSiddiqui/offsetkeeper="$GITHUB_WORKSPACE"
+          go get github.com/AynSiddiqui/offsetkeeper
+          awk '/^```go/{flag=1; next} /^```/{if(flag) exit} flag{print}' "$GITHUB_WORKSPACE/README.md" > main.go
+          go build .
