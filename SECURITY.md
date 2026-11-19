@@ -1,11 +1,13 @@
 # Security policy
 
 ## Supported versions
-offsetkeeper is pre-release (no tag yet). Only the latest commit on `main` is
+
+During the v0.x cycle, only the latest release (and the tip of `main`) is
 supported. After v1.0.0, the latest minor release gets security fixes; older
 minors do not.
 
 ## Reporting a vulnerability
+
 Do not open a public issue or pull request. Use GitHub private vulnerability
 reporting: **Security tab → Report a vulnerability** on
 <https://github.com/AynSiddiqui/offsetkeeper/security/advisories/new>.

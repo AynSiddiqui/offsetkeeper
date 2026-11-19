@@ -113,11 +113,28 @@ Full rules and sources: [STYLE.md](STYLE.md). The short list:
   go install golang.org/x/exp/cmd/gorelease@latest
   gorelease -base=<last tag>     # suggests the version and flags incompatible changes
   ```
+  For the first release tag (`v0.1.0`), run `gorelease -version=v0.1.0` without a `-base` flag.
   An incompatible change needs a major bump (or `0.y` minor while pre-1.0)
   and a `BREAKING CHANGE:` footer.
 - Release steps: green CI on `main`, update `CHANGELOG.md`, tag `vX.Y.Z`
   (annotated), push the tag, create the GitHub release from the changelog
   section. Releases are not signed and ship no SBOM.
+- **Post-tag smoke test** in a fresh module without `replace`:
+  ```bash
+  mkdir /tmp/smoke && cd /tmp/smoke
+  go mod init smoke
+  go get github.com/AynSiddiqui/offsetkeeper@v0.1.0
+  # Build the README quickstart against the published module
+  go build .
+  # Verify CLI install
+  go install github.com/AynSiddiqui/offsetkeeper/cmd/offsetkeeper@v0.1.0
+  ```
+- **pkg.go.dev check**: verify documentation and example rendering at `https://pkg.go.dev/github.com/AynSiddiqui/offsetkeeper@v0.1.0`.
+- **GitHub settings checklist**:
+  - Private vulnerability reporting enabled (Settings → Code security and analysis).
+  - Squash merging only (disallow merge commits and rebase merging).
+  - Required status checks after the first green run on `main`.
+  - Code-owner review configured without blocking the solo maintainer (allow maintainer bypass or omit mandatory 2-person approval).
 
 ## Dependencies
 Stdlib and franz-go only. No testify, no testcontainers. Dependabot opens

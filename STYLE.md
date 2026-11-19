@@ -25,7 +25,7 @@ Source: [Code Review Comments](https://go.dev/wiki/CodeReviewComments), [Google 
 - Return errors; never `panic` for control flow (a recovered handler panic becomes an error).
 - Strings are lowercase, no trailing punctuation, and start with `offsetkeeper:` at the API edge.
 - Wrap with `%w` when callers may match the cause; include topic, partition and offset where known. No "failed to".
-- Handle an error once: return it or log it, not both.
+- Handle an error once: return it or log it, not both. Exception: per-attempt `Warn` logs on retry or dead-letter are deliberate observability and permitted alongside returned errors.
 - Expose sentinels or types for `errors.Is`/`errors.As`; never make callers match strings.
 - Never discard an error with `_` unless a comment says why.
 
@@ -52,7 +52,7 @@ Source: [Uber: don't fire-and-forget goroutines](https://github.com/uber-go/guid
 ## Logging
 - `log/slog` only, through the `Config.Logger` (nil means `slog.Default()`). No `log`, no `fmt.Print*` in the library.
 - Structured attributes (`"topic"`, `"partition"`, `"offset"`, `"attempt"`, `"err"`), never string-built messages.
-- Log at the point you handle an error, not where you return it. No secrets or record values in logs.
+- Log at the point you handle an error, not where you return it. Exception: per-attempt `Warn` logs on handler retry or dead-letter produce are deliberate operator observability. No secrets or record values in logs.
 
 Source: [log/slog](https://pkg.go.dev/log/slog), [Google best practices: error handling (log sparingly)](https://google.github.io/styleguide/go/best-practices.html#error-handling).
 
@@ -66,7 +66,7 @@ Source: [Google best practices: option structure](https://google.github.io/style
 
 ## Globals
 - No package-level mutable state, no `init()` side effects, no flags registered by the library (only `package main` defines flags).
-- The only allowed globals are constants, immutable values, and test hooks in `export_test.go`.
+- The only allowed globals are constants, immutable values, and documented test hooks in `export_test.go` (such as `dlqTimeout`).
 - Inject clocks and clients through struct fields.
 
 Source: [Google decisions: global state](https://google.github.io/styleguide/go/decisions.html#global-state), [Uber: avoid mutable globals](https://github.com/uber-go/guide/blob/master/style.md#avoid-mutable-globals), [Uber: avoid init()](https://github.com/uber-go/guide/blob/master/style.md#avoid-init).
@@ -113,7 +113,7 @@ These come from CONTRACT.md and are never traded for convenience.
 2. **DLQ write is acked before the source commit.** If the DLQ cannot be written, `Run` stops with an error; it never drops the record.
 3. **Every wait has a `ctx` or a timeout.** Network calls, commits, DLQ produce, retries and shutdown. Commits ignore the run `ctx` on shutdown, so they carry their own timeout.
 4. **Handlers may see a record twice.** Document it; never promise exactly-once.
-5. **A handler panic or `runtime.Goexit` is a failed attempt**, not a crash and not a success.
+5. **A handler panic is a failed attempt; `runtime.Goexit` is a terminal failure.** Neither crashes the process or counts as success: a panic triggers retry/DLQ, whereas `runtime.Goexit` halts `Run` with an error while preserving earlier settled commits.
 6. **Retries and backoff are bounded** (`MaxAttempts`, capped backoff) and must fit the group rebalance timeout; document the budget.
 7. **Shutdown order:** stop polling, wait for goroutines, commit settled offsets, close the client.
 8. **Weakening options are documented, not hidden.** If a user can void a guarantee through `ClientOpts`, the doc comment says which options.
