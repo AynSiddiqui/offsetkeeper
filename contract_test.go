@@ -20,6 +20,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 
@@ -653,18 +654,19 @@ func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
 	if string(d.Key) != "k1" || string(d.Value) != "poison" {
 		t.Errorf("DLQ key/value = %q/%q, want k1/poison", d.Key, d.Value)
 	}
+	// Literal names on purpose: renaming a constant must fail this test.
 	want := map[string]string{
 		"h1": "v1", "h2": "v2",
-		dlq.HeaderSourceTopic: e.topic, dlq.HeaderSourcePartition: "0", dlq.HeaderSourceOffset: "1",
-		dlq.HeaderAttempts: "3",
+		"offsetkeeper.source.topic": e.topic, "offsetkeeper.source.partition": "0", "offsetkeeper.source.offset": "1",
+		"offsetkeeper.attempts": "3",
 	}
 	for k, v := range want {
 		if got, ok := header(d, k); !ok || got != v {
 			t.Errorf("DLQ header %s = %q (present %v), want %q", k, got, ok, v)
 		}
 	}
-	if got, _ := header(d, dlq.HeaderError); !strings.Contains(got, "kaboom") {
-		t.Errorf("DLQ header %s = %q, want it to contain the handler error", dlq.HeaderError, got)
+	if got, _ := header(d, "offsetkeeper.error"); !strings.Contains(got, "kaboom") {
+		t.Errorf("DLQ header offsetkeeper.error = %q, want it to contain the handler error", got)
 	}
 }
 
@@ -1132,4 +1134,93 @@ func TestDLQNamesOriginalSource(t *testing.T) {
 			t.Errorf("DLQ header %s = %q, want %q", k, got, v)
 		}
 	}
+}
+
+// produceSeen is what one produce request told the broker.
+type produceSeen struct {
+	acks       int16
+	producerID int64
+}
+
+// observeProduce records every Produce request the cluster gets, passing it on
+// to the normal handler. The returned func returns and clears what was seen
+// since the last call. Requests carry a topic ID, not a name, on current Kafka
+// versions, so callers separate producers by phase instead of by topic.
+func observeProduce(t *testing.T, cluster *kfake.Cluster) func() []produceSeen {
+	var (
+		mu   sync.Mutex
+		seen []produceSeen
+	)
+	cluster.ControlKey(int16(kmsg.Produce), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		pr := req.(*kmsg.ProduceRequest)
+		mu.Lock()
+		defer mu.Unlock()
+		for _, rt := range pr.Topics {
+			for _, rp := range rt.Partitions {
+				var b kmsg.RecordBatch // the first batch is enough: one client uses one producer ID
+				if err := b.ReadFrom(rp.Records); err != nil {
+					t.Errorf("decode produce batch for %s: %v", rt.Topic, err)
+					continue
+				}
+				seen = append(seen, produceSeen{pr.Acks, b.ProducerID})
+			}
+		}
+		return nil, nil, false
+	})
+	return func() []produceSeen {
+		mu.Lock()
+		defer mu.Unlock()
+		out := seen
+		seen = nil
+		return out
+	}
+}
+
+func checkAcksAll(t *testing.T, what string, got []produceSeen) {
+	t.Helper()
+	if len(got) == 0 {
+		t.Fatalf("%s: broker saw no produce request", what)
+	}
+	for _, s := range got {
+		if s.acks != -1 || s.producerID < 0 {
+			t.Errorf("%s: produce acks=%d producerID=%d, want acks=-1 and producerID>=0 (idempotent)", what, s.acks, s.producerID)
+		}
+	}
+}
+
+// Publisher and the DLQ produce use acks=all with an idempotent producer on
+// default options; the broker is the witness. kfake only: it reads the produce
+// requests through ControlKey, which a real broker has no equivalent for.
+func TestPublishUsesAcksAllAndIdempotence(t *testing.T) {
+	if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
+		t.Skip("reads produce requests with kfake's ControlKey; a real broker cannot be observed")
+	}
+	cluster, ctx := testenv.Kfake(t), testCtx(t)
+	brokers := cluster.ListenAddrs()
+	e := env{brokers, testenv.Topic(t, brokers, 1), testenv.Group(t), 1}
+	dlqTopic := testenv.Topic(t, brokers, 1)
+	seen := observeProduce(t, cluster)
+
+	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	t.Cleanup(p.Close)
+	if err := p.Publish(ctx, &kgo.Record{Topic: e.topic, Value: []byte("x")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	checkAcksAll(t, "Publisher.Publish", seen())
+
+	e.produce(t, "r", 3)
+	seen() // the test's own seeding produce is not under test
+	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+		if rec.Offset == 1 {
+			return errBoom
+		}
+		return nil
+	})
+	cfg.DLQTopic = dlqTopic
+	start(t, ctx, cfg).until(t, "dead-lettered and drained", func() bool { return e.drained(t) })
+	checkAcksAll(t, "DLQ produce", seen()) // Run produces only the dead letter
 }
