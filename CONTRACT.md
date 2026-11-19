@@ -10,9 +10,10 @@ cluster, Apache Kafka and Redpanda.
    rebalance, failed commit). A record whose handler returned nil is never
    lost. Proof: `TestCrashBeforeCommitRedelivers`, `TestKafkaKeyIsNotMessageID`.
 2. **Order within a partition.** Records of one partition are handled one at a
-   time in offset order; the next starts only after the previous is settled.
+   time in offset order; the next starts only after the previous is settled,
+   including across split fetches of the same partition.
    Partitions run concurrently; there is no order across partitions.
-   Proof: `TestPartitionOrder`.
+   Proof: `TestPartitionOrder`, `TestBatchSplitFetchSamePartition` (internal).
 3. **Settlement.** A handler returning nil settles the record. An error is
    retried up to `MaxAttempts` with doubling backoff, unless wrapped in
    `Permanent`; a recovered panic counts as an error. After the last attempt,
@@ -29,30 +30,38 @@ cluster, Apache Kafka and Redpanda.
    `TestHandlerReturnOwnsSettlement`, `TestHandlerGoexitStopsRun`,
    `TestDLQProduceTimeoutStopsRun` (kfake only).
 4. **Commit.** Offsets are committed synchronously after each poll batch, at the
-   highest contiguous settled offset per partition. Never past an unsettled
-   record. When `Run` stops on an error, the settled prefix of every partition
-   is committed first, not only the failing one's. A commit error makes `Run`
-   return it.
+   highest contiguous settled offset per partition (offset plus one). Never past an
+   unsettled record. When `Run` stops on an error, the settled prefix of every
+   partition is committed first, not only the failing one's. A commit error makes
+   `Run` return it. Handlers cannot change the committed offset by modifying
+   their record.
    Proof: `TestNoCommitPastFailedRecord`, `TestHandlerReturnOwnsSettlement`,
-   `TestErrorExitCommitsOtherPartitions`, `TestCommitErrorStopsRun`.
+   `TestErrorExitCommitsOtherPartitions`, `TestCommitErrorStopsRun` (kfake only),
+   `TestHandlerCannotMoveCommit`.
 5. **Rebalance.** A rebalance waits until the current batch is settled and
-   committed. Proof: `TestRebalanceDuringHandler`.
+   committed. If a rebalance begins while a batch is in flight, the consumer
+   is evicted only if the remaining batch work exceeds the rebalance timeout.
+   Proof: `TestRebalanceDuringHandler`.
 6. **Shutdown.** On context cancel there are no new polls, records or retries.
    Records whose handler already returned nil are committed, then `Run`
-   returns nil. Unsettled records are redelivered later.
-   A handler that fails only because of the cancel is not dead-lettered.
+   returns nil (or any commit error if committing fails). Unsettled records
+   are redelivered later. A handler that fails only because of the cancel is
+   not dead-lettered.
    Proof: `TestShutdownDrains`, `TestShutdownDrainsWithDLQ`,
    `TestNoRecordHandledAfterCancel`, `TestRetryBackoffStopsOnShutdown`.
 7. **DLQ record.** Same key, value and headers as the source, plus
    `offsetkeeper.source.topic`, `.source.partition`, `.source.offset`,
-   `offsetkeeper.error` and `offsetkeeper.attempts`. The DLQ write is
+   `offsetkeeper.error` (capped at 4 KiB) and `offsetkeeper.attempts`. Mutating
+   topic or offset in the handler does not alter these headers. The DLQ write is
    confirmed before the source offset is committed, and a replayed record is
    processed once more. `ReplayOne` is independent of `ReplayAll`'s tracking
    (group `offsetkeeper-replay.<topic>`): it does not move that group's offset,
    so a later `ReplayAll` replays the same record again. Proof: `TestDLQWriteConfirmedBeforeSourceCommit`,
-   `TestReplayedRecordIsProcessedOnceMore`.
+   `TestReplayedRecordIsProcessedOnceMore`, `TestDLQNamesOriginalSource`,
+   `TestDLQErrorHeaderCapped`.
 8. **Publish.** `Publisher.Publish` returns nil only after the broker has
-   acked every record. Proof: `TestProduceIsAcknowledged`.
+   acked every record with acks=all and idempotence enabled. Proof: `TestProduceIsAcknowledged`,
+   `TestPublishUsesAcksAllAndIdempotence` (kfake only).
 
 ## Not promised
 
@@ -62,12 +71,15 @@ cluster, Apache Kafka and Redpanda.
   below all, or disabling idempotence). Such options void guarantees 3, 7 and 8.
 - **Handler batches longer than the rebalance timeout.** A poll batch,
   retries included, must finish within the group rebalance timeout (kgo
-  default 60s), or the group may evict the consumer and redeliver the batch.
-  A batch is up to 500 records per poll, handled in order per partition. The
-  worst-case retry time of one record is the sum of its backoffs (doubling from
-  `Backoff`, capped at 30s each) and must fit in that budget. For example
-  `MaxAttempts=5, Backoff=10s` waits 10+20+30+30 = 90s for one failing record,
-  so that member is always evicted.
+  default 60s) once a rebalance starts, or the group may evict the consumer and
+  redeliver the batch. Heartbeats continue in the background while processing, so
+  a long batch causes eviction only if a rebalance begins mid-batch and outlives
+  the rebalance timeout. A batch is up to 500 records per poll, handled in order
+  per partition. The worst-case retry time of one record is the sum of its
+  backoffs (doubling from `Backoff`, capped at 30s each) and must fit in that
+  budget. For example `MaxAttempts=5, Backoff=10s` waits 10+20+30+30 = 90s for
+  one failing record; if a rebalance begins early in that window, the member is
+  evicted.
 - **A bounded wait on a DLQ produce the broker never answers.** The 30s DLQ
   timeout turns a produce that fails with a broker error into a `Run` error.
   If the request was already sent and no response ever arrives, kgo cannot
