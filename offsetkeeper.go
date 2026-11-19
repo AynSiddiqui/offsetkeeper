@@ -53,8 +53,11 @@ type Config struct {
 	MaxAttempts int
 	// Backoff is the delay before the 2nd attempt, doubled each time, capped at
 	// 30s; 0 means 100ms. See MaxAttempts for the budget it must fit in.
-	Backoff    time.Duration
-	DLQTopic   string       // "" means Run returns the error instead of dead-lettering
+	Backoff time.Duration
+	// DLQTopic "" means Run returns the error instead of dead-lettering. It must
+	// not be in Topics (rejected); if ClientOpts adds kgo.ConsumeRegex, make the
+	// pattern exclude it, since that cannot be checked here.
+	DLQTopic   string
 	Logger     *slog.Logger // nil means slog.Default()
 	ClientOpts []kgo.Opt    // TLS, SASL, tuning; offsetkeeper appends its own group/commit opts last so they win
 }
@@ -74,6 +77,9 @@ func (c Config) withDefaults() (Config, error) {
 		return c, fmt.Errorf("offsetkeeper: Config.MaxAttempts must be >= 0, got %d", c.MaxAttempts)
 	case c.Backoff < 0:
 		return c, fmt.Errorf("offsetkeeper: Config.Backoff must be >= 0, got %s", c.Backoff)
+	case c.DLQTopic != "" && slices.Contains(c.Topics, c.DLQTopic):
+		// A dead letter would be consumed again, fail again and be re-dead-lettered forever.
+		return c, fmt.Errorf("offsetkeeper: Config.DLQTopic %q must not be in Config.Topics", c.DLQTopic)
 	}
 	if c.MaxAttempts == 0 {
 		c.MaxAttempts = defaultMaxAttempts
