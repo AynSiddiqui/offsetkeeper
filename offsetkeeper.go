@@ -92,6 +92,12 @@ func (c Config) withDefaults() (Config, error) {
 		// A dead letter would be consumed again, fail again and be re-dead-lettered forever.
 		return c, fmt.Errorf("offsetkeeper: Config.DLQTopic %q must not be in Config.Topics", c.DLQTopic)
 	}
+	if i := slices.Index(c.Brokers, ""); i >= 0 {
+		return c, fmt.Errorf("offsetkeeper: Config.Brokers[%d] must not be empty", i)
+	}
+	if i := slices.Index(c.Topics, ""); i >= 0 {
+		return c, fmt.Errorf("offsetkeeper: Config.Topics[%d] must not be empty", i)
+	}
 	if c.MaxAttempts == 0 {
 		c.MaxAttempts = defaultMaxAttempts
 	}
