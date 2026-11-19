@@ -1,0 +1,13 @@
+version: "2"
+linters:
+  default: none
+  enable: [govet, staticcheck, errcheck, revive, misspell]
+  settings:
+    errcheck:
+      # CLI output to stdout/stderr: a failed terminal write has no recovery.
+      exclude-functions: [fmt.Fprintf, fmt.Fprintln, fmt.Fprint]
+    revive:
+      rules:
+        - name: exported
+formatters:
+  enable: [gofmt, goimports]

@@ -1,0 +1,8 @@
+*.test
+*.out
+coverage.*
+/offsetkeeper
+.idea/
+.vscode/
+go.work
+go.work.sum
