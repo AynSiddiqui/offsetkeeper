@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -281,18 +282,32 @@ func selfSignedCA(t *testing.T) (*tls.Config, string) {
 	return &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}, path
 }
 
-// -tls dials with the system root CAs. Go reads SSL_CERT_FILE once, at the first
-// use of the system roots; no other test here uses them, so setting it works.
+// -tls dials with the system root CAs. Go reads SSL_CERT_FILE once per process,
+// at the first use of the system roots, so the CLI runs in a fresh child
+// process with it set before start; a repeat run (-count=2) then still works.
 func TestTLSFlag(t *testing.T) {
 	serverCfg, caFile := selfSignedCA(t)
-	t.Setenv("SSL_CERT_FILE", caFile)
 	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.TLS(serverCfg), kfake.SeedTopics(1, "dlq"))
 	if err != nil {
 		t.Fatalf("kfake: %v", err)
 	}
 	t.Cleanup(cluster.Close)
-	brokers := strings.Join(cluster.ListenAddrs(), ",")
 
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperTLSChild$", "-test.timeout=60s")
+	cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+caFile, tlsChildEnv+"="+strings.Join(cluster.ListenAddrs(), ","))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+}
+
+const tlsChildEnv = "OFFSETKEEPER_TLS_CHILD_BROKERS"
+
+// TestHelperTLSChild is TestTLSFlag's child process, not a test of its own.
+func TestHelperTLSChild(t *testing.T) {
+	brokers := os.Getenv(tlsChildEnv)
+	if brokers == "" {
+		t.Skip("runs only as the child of TestTLSFlag")
+	}
 	for _, args := range [][]string{
 		{"dlq", "list", "-brokers", brokers, "-topic", "dlq", "-tls"},
 		{"dlq", "replay", "-brokers", brokers, "-topic", "dlq", "-tls"},
