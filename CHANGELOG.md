@@ -4,6 +4,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING:** the library moved from the module root to `offsetkeeper/`. Change `import "github.com/AynSiddiqui/offsetkeeper"` to `import "github.com/AynSiddiqui/offsetkeeper/offsetkeeper"` and run `go get github.com/AynSiddiqui/offsetkeeper/offsetkeeper`; `offsetkeeper.X` calls are unchanged. The CLI install path is unchanged.
+
 ## [v0.1.0] - 2026-11-20
 
 First release.

@@ -1,4 +1,4 @@
-package offsetkeeper_test
+package edge_test
 
 import (
 	"bytes"
@@ -15,9 +15,10 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"github.com/AynSiddiqui/offsetkeeper"
 	"github.com/AynSiddiqui/offsetkeeper/internal/dlq"
+	"github.com/AynSiddiqui/offsetkeeper/internal/harness"
 	"github.com/AynSiddiqui/offsetkeeper/internal/testenv"
+	"github.com/AynSiddiqui/offsetkeeper/offsetkeeper"
 )
 
 func testClient(t *testing.T, brokers []string, opts ...kgo.Opt) *kgo.Client {
@@ -34,21 +35,21 @@ func testClient(t *testing.T, brokers []string, opts ...kgo.Opt) *kgo.Client {
 // docs/CONTRACT.md: Guarantee 1 (at-least-once), Guarantee 3 (settlement), Guarantee 7 (DLQ record has same key/value).
 // Review verdict: fix (route both empty shapes through DLQ and replay; compare nilness and bytes at each stage).
 func TestEdgeRecordShapes_NilEmptyTombstone(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 	records := []*kgo.Record{
-		{Topic: e.topic, Partition: 0, Key: nil, Value: []byte("val-nil-key")},
-		{Topic: e.topic, Partition: 0, Key: []byte("key-tombstone"), Value: nil}, // tombstone
-		{Topic: e.topic, Partition: 0, Key: nil, Value: nil},                     // nil key & nil val
-		{Topic: e.topic, Partition: 0, Key: []byte("key-empty-val"), Value: []byte{}},
-		{Topic: e.topic, Partition: 0, Key: []byte{}, Value: []byte{}}, // empty key & empty val
+		{Topic: e.Topic, Partition: 0, Key: nil, Value: []byte("val-nil-key")},
+		{Topic: e.Topic, Partition: 0, Key: []byte("key-tombstone"), Value: nil}, // tombstone
+		{Topic: e.Topic, Partition: 0, Key: nil, Value: nil},                     // nil key & nil val
+		{Topic: e.Topic, Partition: 0, Key: []byte("key-empty-val"), Value: []byte{}},
+		{Topic: e.Topic, Partition: 0, Key: []byte{}, Value: []byte{}}, // empty key & empty val
 	}
-	testenv.Produce(t, e.brokers, records...)
+	testenv.Produce(t, e.Brokers, records...)
 
 	var mu sync.Mutex
 	var handled []*kgo.Record
-	cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 		mu.Lock()
 		handled = append(handled, &kgo.Record{
 			Key:   slices.Clone(r.Key),
@@ -57,22 +58,22 @@ func TestEdgeRecordShapes_NilEmptyTombstone(t *testing.T) {
 		mu.Unlock()
 		// Fail records 1, 2, 3, 4 to route tombstone and both empty shapes through DLQ and replay
 		if r.Offset >= 1 {
-			return errBoom
+			return harness.ErrBoom
 		}
 		return nil
 	})
 	cfg.DLQTopic = dlqTopic
 	cfg.MaxAttempts = 1
 
-	r := start(t, ctx, cfg)
-	r.until(t, "handled all 5 records and dead-lettered 4", func() bool {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "handled all 5 records and dead-lettered 4", func() bool {
 		mu.Lock()
 		n := len(handled)
 		mu.Unlock()
-		return n >= 5 && e.total(t, dlqTopic) == 4 && e.drained(t)
+		return n >= 5 && e.Total(t, dlqTopic) == 4 && e.Drained(t)
 	})
-	r.cancel()
-	if err := r.wait(t, waitFor); err != nil {
+	r.Cancel()
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -96,7 +97,7 @@ func TestEdgeRecordShapes_NilEmptyTombstone(t *testing.T) {
 	}
 
 	// Replay all 4 dead-lettered records
-	dlqCl := testClient(t, e.brokers)
+	dlqCl := testClient(t, e.Brokers)
 	replayed, err := dlq.ReplayAll(ctx, dlqCl, dlqTopic)
 	if err != nil {
 		t.Fatalf("ReplayAll: %v", err)
@@ -106,7 +107,7 @@ func TestEdgeRecordShapes_NilEmptyTombstone(t *testing.T) {
 	}
 
 	// Stage 2: Compare nilness and bytes after replay on source topic
-	sourceRecords := testenv.Records(t, e.brokers, e.topic)
+	sourceRecords := testenv.Records(t, e.Brokers, e.Topic)
 	if len(sourceRecords) != 9 { // 5 original + 4 replayed
 		t.Fatalf("total source records = %d, want 9", len(sourceRecords))
 	}
@@ -140,41 +141,41 @@ func TestEdgeRecordShapes_NilEmptyTombstone(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 1, 3, 7, 8. Note: ClientOpts must configure ProducerBatchMaxBytes for >1MB.
 // Review verdict: keep (retain sized clients and compressible fixture; claim logical payload size).
 func TestEdgeRecordShapes_1MiBValue(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 	val := make([]byte, 1<<20) // 1 MiB logical payload
 	for i := range val {
 		val[i] = byte(i % 251)
 	}
 
-	prodCl := testClient(t, e.brokers, kgo.ProducerBatchMaxBytes(2<<20))
-	rec := &kgo.Record{Topic: e.topic, Partition: 0, Value: val}
+	prodCl := testClient(t, e.Brokers, kgo.ProducerBatchMaxBytes(2<<20))
+	rec := &kgo.Record{Topic: e.Topic, Partition: 0, Value: val}
 	if err := prodCl.ProduceSync(ctx, rec).FirstErr(); err != nil {
 		t.Fatalf("produce 1MiB: %v", err)
 	}
 
 	var mu sync.Mutex
 	var handledVal []byte
-	cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 		mu.Lock()
 		handledVal = bytes.Clone(r.Value)
 		mu.Unlock()
-		return errBoom // trigger DLQ to verify 1 MiB dead-letter produce
+		return harness.ErrBoom // trigger DLQ to verify 1 MiB dead-letter produce
 	})
 	cfg.DLQTopic = dlqTopic
 	cfg.MaxAttempts = 1
 	cfg.ClientOpts = []kgo.Opt{kgo.ProducerBatchMaxBytes(2 << 20)}
 
-	r := start(t, ctx, cfg)
-	r.until(t, "handled 1MiB record and dead-lettered", func() bool {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "handled 1MiB record and dead-lettered", func() bool {
 		mu.Lock()
 		n := len(handledVal)
 		mu.Unlock()
-		return n == 1<<20 && e.total(t, dlqTopic) == 1 && e.drained(t)
+		return n == 1<<20 && e.Total(t, dlqTopic) == 1 && e.Drained(t)
 	})
-	r.cancel()
-	if err := r.wait(t, waitFor); err != nil {
+	r.Cancel()
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -186,7 +187,7 @@ func TestEdgeRecordShapes_1MiBValue(t *testing.T) {
 	}
 
 	// Verify DLQ and Replay with 1 MiB payload
-	replayCl := testClient(t, e.brokers, kgo.ProducerBatchMaxBytes(2<<20))
+	replayCl := testClient(t, e.Brokers, kgo.ProducerBatchMaxBytes(2<<20))
 	replayed, err := dlq.ReplayAll(ctx, replayCl, dlqTopic)
 	if err != nil {
 		t.Fatalf("ReplayAll: %v", err)
@@ -195,7 +196,7 @@ func TestEdgeRecordShapes_1MiBValue(t *testing.T) {
 		t.Fatalf("replayed %d, want 1", replayed)
 	}
 
-	srcRecs := testenv.Records(t, e.brokers, e.topic)
+	srcRecs := testenv.Records(t, e.Brokers, e.Topic)
 	if len(srcRecs) != 2 { // 1 original + 1 replayed
 		t.Fatalf("source topic records = %d, want 2", len(srcRecs))
 	}
@@ -208,8 +209,8 @@ func TestEdgeRecordShapes_1MiBValue(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source, plus offsetkeeper.*").
 // Review verdict: keep (keep full sequence comparison).
 func TestEdgeRecordShapes_500Headers(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 	var origHeaders []kgo.RecordHeader
 	for i := 0; i < 500; i++ {
@@ -218,29 +219,29 @@ func TestEdgeRecordShapes_500Headers(t *testing.T) {
 			Value: []byte(fmt.Sprintf("val-%03d", i)),
 		})
 	}
-	rec := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("val"), Headers: origHeaders}
-	testenv.Produce(t, e.brokers, rec)
+	rec := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("val"), Headers: origHeaders}
+	testenv.Produce(t, e.Brokers, rec)
 
 	var mu sync.Mutex
 	var gotHeaders []kgo.RecordHeader
-	cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 		mu.Lock()
 		gotHeaders = slices.Clone(r.Headers)
 		mu.Unlock()
-		return errBoom // trigger DLQ
+		return harness.ErrBoom // trigger DLQ
 	})
 	cfg.DLQTopic = dlqTopic
 	cfg.MaxAttempts = 1
 
-	r := start(t, ctx, cfg)
-	r.until(t, "handler processed 500 headers and dead-lettered", func() bool {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "handler processed 500 headers and dead-lettered", func() bool {
 		mu.Lock()
 		n := len(gotHeaders)
 		mu.Unlock()
-		return n == 500 && e.total(t, dlqTopic) == 1 && e.drained(t)
+		return n == 500 && e.Total(t, dlqTopic) == 1 && e.Drained(t)
 	})
-	r.cancel()
-	if err := r.wait(t, waitFor); err != nil {
+	r.Cancel()
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -258,12 +259,12 @@ func TestEdgeRecordShapes_500Headers(t *testing.T) {
 	}
 
 	// Replay and verify all 500 headers preserved and offsetkeeper headers stripped
-	replayCl := testClient(t, e.brokers)
+	replayCl := testClient(t, e.Brokers)
 	if n, err := dlq.ReplayAll(ctx, replayCl, dlqTopic); err != nil || n != 1 {
 		t.Fatalf("ReplayAll: n=%d err=%v", n, err)
 	}
 
-	srcRecs := testenv.Records(t, e.brokers, e.topic)
+	srcRecs := testenv.Records(t, e.Brokers, e.Topic)
 	if len(srcRecs) != 2 {
 		t.Fatalf("source records = %d, want 2", len(srcRecs))
 	}
@@ -284,44 +285,44 @@ func TestEdgeRecordShapes_500Headers(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 7 ("all headers prefixed with offsetkeeper. are reserved and stripped before replaying").
 // Review verdict: keep (keep collision and custom-prefix cases).
 func TestEdgeRecordShapes_ReservedHeaders(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 	rec := &kgo.Record{
-		Topic: e.topic, Partition: 0, Value: []byte("val"),
+		Topic: e.Topic, Partition: 0, Value: []byte("val"),
 		Headers: []kgo.RecordHeader{
 			{Key: "offsetkeeper.source.topic", Value: []byte("spoofed-topic")},
 			{Key: "offsetkeeper.custom.flag", Value: []byte("custom-flag")},
 			{Key: "user.app.header", Value: []byte("app-value")},
 		},
 	}
-	testenv.Produce(t, e.brokers, rec)
+	testenv.Produce(t, e.Brokers, rec)
 
 	var mu sync.Mutex
 	var handlerHeaders []kgo.RecordHeader
-	cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 		mu.Lock()
 		handlerHeaders = slices.Clone(r.Headers)
 		mu.Unlock()
-		return errBoom
+		return harness.ErrBoom
 	})
 	cfg.DLQTopic = dlqTopic
 	cfg.MaxAttempts = 1
 
-	r := start(t, ctx, cfg)
-	r.until(t, "handled and dead-lettered", func() bool {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "handled and dead-lettered", func() bool {
 		mu.Lock()
 		n := len(handlerHeaders)
 		mu.Unlock()
-		return n == 3 && e.total(t, dlqTopic) == 1 && e.drained(t)
+		return n == 3 && e.Total(t, dlqTopic) == 1 && e.Drained(t)
 	})
-	r.cancel()
-	if err := r.wait(t, waitFor); err != nil {
+	r.Cancel()
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
 	// Verify DLQ decode uses real source topic, not spoofed user header
-	dlqCl := testClient(t, e.brokers)
+	dlqCl := testClient(t, e.Brokers)
 	var listEntry dlq.Entry
 	err := dlq.List(ctx, dlqCl, dlqTopic, func(e dlq.Entry) error {
 		listEntry = e
@@ -330,8 +331,8 @@ func TestEdgeRecordShapes_ReservedHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if listEntry.SourceTopic != e.topic {
-		t.Fatalf("DLQ decoded SourceTopic = %q, want real topic %q", listEntry.SourceTopic, e.topic)
+	if listEntry.SourceTopic != e.Topic {
+		t.Fatalf("DLQ decoded SourceTopic = %q, want real topic %q", listEntry.SourceTopic, e.Topic)
 	}
 
 	// Replay and verify all offsetkeeper.* headers stripped, app header kept
@@ -339,7 +340,7 @@ func TestEdgeRecordShapes_ReservedHeaders(t *testing.T) {
 		t.Fatalf("ReplayAll: n=%d err=%v", n, err)
 	}
 
-	srcRecs := testenv.Records(t, e.brokers, e.topic)
+	srcRecs := testenv.Records(t, e.Brokers, e.Topic)
 	if len(srcRecs) != 2 {
 		t.Fatalf("source records = %d, want 2", len(srcRecs))
 	}
@@ -349,7 +350,7 @@ func TestEdgeRecordShapes_ReservedHeaders(t *testing.T) {
 			t.Errorf("replayed record still has reserved header: %s=%s", h.Key, h.Value)
 		}
 	}
-	if val, ok := header(replayed, "user.app.header"); !ok || val != "app-value" {
+	if val, ok := harness.Header(replayed, "user.app.header"); !ok || val != "app-value" {
 		t.Errorf("user.app.header missing or wrong on replayed record: ok=%v val=%s", ok, val)
 	}
 }
@@ -358,8 +359,8 @@ func TestEdgeRecordShapes_ReservedHeaders(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source...").
 // Review verdict: fix (compare full ordered pairs at handler and replay, and check r.wait).
 func TestEdgeRecordShapes_DuplicateHeaderKeys(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 	headers := []kgo.RecordHeader{
 		{Key: "x-dup", Value: []byte("first")},
@@ -367,29 +368,29 @@ func TestEdgeRecordShapes_DuplicateHeaderKeys(t *testing.T) {
 		{Key: "x-dup", Value: []byte("second")},
 		{Key: "x-dup", Value: []byte("third")},
 	}
-	rec := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("val"), Headers: headers}
-	testenv.Produce(t, e.brokers, rec)
+	rec := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("val"), Headers: headers}
+	testenv.Produce(t, e.Brokers, rec)
 
 	var mu sync.Mutex
 	var handlerHeaders []kgo.RecordHeader
-	cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 		mu.Lock()
 		handlerHeaders = slices.Clone(r.Headers)
 		mu.Unlock()
-		return errBoom
+		return harness.ErrBoom
 	})
 	cfg.DLQTopic = dlqTopic
 	cfg.MaxAttempts = 1
 
-	r := start(t, ctx, cfg)
-	r.until(t, "handled and dead-lettered", func() bool {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "handled and dead-lettered", func() bool {
 		mu.Lock()
 		n := len(handlerHeaders)
 		mu.Unlock()
-		return n == 4 && e.total(t, dlqTopic) == 1 && e.drained(t)
+		return n == 4 && e.Total(t, dlqTopic) == 1 && e.Drained(t)
 	})
-	r.cancel()
-	if err := r.wait(t, waitFor); err != nil {
+	r.Cancel()
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -408,12 +409,12 @@ func TestEdgeRecordShapes_DuplicateHeaderKeys(t *testing.T) {
 	}
 
 	// Replay and verify duplicate headers and interleaved x-other stay preserved in exact order
-	replayCl := testClient(t, e.brokers)
+	replayCl := testClient(t, e.Brokers)
 	if n, err := dlq.ReplayAll(ctx, replayCl, dlqTopic); err != nil || n != 1 {
 		t.Fatalf("ReplayAll: n=%d err=%v", n, err)
 	}
 
-	srcRecs := testenv.Records(t, e.brokers, e.topic)
+	srcRecs := testenv.Records(t, e.Brokers, e.Topic)
 	if len(srcRecs) != 2 {
 		t.Fatalf("source records = %d, want 2", len(srcRecs))
 	}
@@ -432,8 +433,8 @@ func TestEdgeRecordShapes_DuplicateHeaderKeys(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source...").
 // Review verdict: fix (require r.wait to return nil).
 func TestEdgeRecordShapes_NonUTF8Bytes(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 	rawKey := []byte{0xff, 0xfe, 0x00, 0x80}
 	rawVal := []byte{0x80, 0x81, 0xff, 0x00, 0xfe}
@@ -441,16 +442,16 @@ func TestEdgeRecordShapes_NonUTF8Bytes(t *testing.T) {
 	rawHdrVal := []byte{0xde, 0xad, 0xbe, 0xef, 0xff}
 
 	rec := &kgo.Record{
-		Topic: e.topic, Partition: 0,
+		Topic: e.Topic, Partition: 0,
 		Key: rawKey, Value: rawVal,
 		Headers: []kgo.RecordHeader{{Key: rawHdrKey, Value: rawHdrVal}},
 	}
-	testenv.Produce(t, e.brokers, rec)
+	testenv.Produce(t, e.Brokers, rec)
 
 	var mu sync.Mutex
 	var gotKey, gotVal, gotHdrVal []byte
 	var gotHdrKey string
-	cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 		mu.Lock()
 		gotKey = slices.Clone(r.Key)
 		gotVal = slices.Clone(r.Value)
@@ -459,20 +460,20 @@ func TestEdgeRecordShapes_NonUTF8Bytes(t *testing.T) {
 			gotHdrVal = slices.Clone(r.Headers[0].Value)
 		}
 		mu.Unlock()
-		return errBoom
+		return harness.ErrBoom
 	})
 	cfg.DLQTopic = dlqTopic
 	cfg.MaxAttempts = 1
 
-	r := start(t, ctx, cfg)
-	r.until(t, "handled and dead-lettered", func() bool {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "handled and dead-lettered", func() bool {
 		mu.Lock()
 		n := len(gotKey)
 		mu.Unlock()
-		return n > 0 && e.total(t, dlqTopic) == 1 && e.drained(t)
+		return n > 0 && e.Total(t, dlqTopic) == 1 && e.Drained(t)
 	})
-	r.cancel()
-	if err := r.wait(t, waitFor); err != nil {
+	r.Cancel()
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -488,12 +489,12 @@ func TestEdgeRecordShapes_NonUTF8Bytes(t *testing.T) {
 	}
 
 	// Replay and verify byte fidelity
-	replayCl := testClient(t, e.brokers)
+	replayCl := testClient(t, e.Brokers)
 	if n, err := dlq.ReplayAll(ctx, replayCl, dlqTopic); err != nil || n != 1 {
 		t.Fatalf("ReplayAll: n=%d err=%v", n, err)
 	}
 
-	srcRecs := testenv.Records(t, e.brokers, e.topic)
+	srcRecs := testenv.Records(t, e.Brokers, e.Topic)
 	if len(srcRecs) != 2 {
 		t.Fatalf("source records = %d, want 2", len(srcRecs))
 	}
@@ -514,14 +515,14 @@ func TestEdgeRecordShapes_NonUTF8Bytes(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 3 (settlement), Guarantee 4 (commit never past unsettled).
 // Review verdict: fix (derive offsets dynamically from produce results/ack to support all brokers including Redpanda).
 func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	txCl := testClient(t, e.brokers,
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	txCl := testClient(t, e.Brokers,
 		kgo.TransactionalID("tx-rc-"+testenv.Group(t)),
 		kgo.RecordPartitioner(kgo.ManualPartitioner()),
 	)
 
 	// Txn 1: Commit record 0 ("tx-0")
-	rec0 := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-0")}
+	rec0 := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-0")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 1: %v", err)
 	}
@@ -534,7 +535,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 	off0 := rec0.Offset
 
 	// Txn 2: Abort record ("tx-aborted") -> creates offset gap
-	recAbort := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-aborted")}
+	recAbort := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-aborted")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 2: %v", err)
 	}
@@ -546,7 +547,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 	}
 
 	// Txn 3: Commit record ("tx-interior") -> interior failing record
-	recInterior := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-interior")}
+	recInterior := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-interior")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 3: %v", err)
 	}
@@ -559,7 +560,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 	offInterior := recInterior.Offset
 
 	// Txn 4: Commit record ("tx-successor") -> visible successor in same partition/batch
-	recSuccessor := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-successor")}
+	recSuccessor := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-successor")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 4: %v", err)
 	}
@@ -581,14 +582,14 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 
 	// Subcase 1: Interior failure after gap blocks commit and handler never sees successor
 	t.Run("FailAfterGapBlocksCommit", func(t *testing.T) {
-		sctx, scancel := context.WithTimeout(ctx, waitFor)
+		sctx, scancel := context.WithTimeout(ctx, harness.WaitFor)
 		defer scancel()
 		group := testenv.Group(t)
 
 		var mu sync.Mutex
 		var seenOffsets []int64
 		cfg := offsetkeeper.Config{
-			Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+			Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 			MaxAttempts: 1,
 			ClientOpts:  []kgo.Opt{kgo.FetchIsolationLevel(kgo.ReadCommitted())},
 			Handler: func(_ context.Context, r *kgo.Record) error {
@@ -596,7 +597,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 				seenOffsets = append(seenOffsets, r.Offset)
 				mu.Unlock()
 				if r.Offset == offInterior {
-					return errBoom
+					return harness.ErrBoom
 				}
 				return nil
 			},
@@ -605,8 +606,8 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error from Run on interior failing record")
 		}
-		if !errors.Is(err, errBoom) {
-			t.Fatalf("Run error = %v, want errors.Is errBoom", err)
+		if !errors.Is(err, harness.ErrBoom) {
+			t.Fatalf("Run error = %v, want errors.Is harness.ErrBoom", err)
 		}
 
 		mu.Lock()
@@ -619,7 +620,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 			t.Fatalf("handler seen offsets = %v, want exactly %v (successor %d must not run)", gotSeen, wantSeen, offSuccessor)
 		}
 
-		comm := testenv.Committed(t, e.brokers, group, e.topic)
+		comm := testenv.Committed(t, e.Brokers, group, e.Topic)
 		if comm[0] > offInterior {
 			t.Fatalf("committed %d past failed offset %d", comm[0], offInterior)
 		}
@@ -629,13 +630,13 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 		}
 
 		// Fresh consumer resuming from committed offset receives [offInterior, offSuccessor] in order
-		freshCl := testClient(t, e.brokers,
+		freshCl := testClient(t, e.Brokers,
 			kgo.ConsumerGroup(group),
-			kgo.ConsumeTopics(e.topic),
+			kgo.ConsumeTopics(e.Topic),
 			kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 		)
 		var resumedOffs []int64
-		testenv.Eventually(t, waitFor, func() bool {
+		testenv.Eventually(t, harness.WaitFor, func() bool {
 			fs := freshCl.PollFetches(sctx)
 			if err := fs.Err0(); err != nil {
 				t.Fatalf("fetch error: %v", err)
@@ -654,14 +655,14 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 
 	// Subcase 2: Fully settled batch asserts exact ordered visible offsets [off0, offInterior, offSuccessor]
 	t.Run("FullySettledResumesClean", func(t *testing.T) {
-		sctx, scancel := context.WithTimeout(ctx, waitFor)
+		sctx, scancel := context.WithTimeout(ctx, harness.WaitFor)
 		defer scancel()
 		group := testenv.Group(t)
 
 		var mu sync.Mutex
 		var handled []int64
 		cfg := offsetkeeper.Config{
-			Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+			Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 			ClientOpts: []kgo.Opt{kgo.FetchIsolationLevel(kgo.ReadCommitted())},
 			Handler: func(_ context.Context, r *kgo.Record) error {
 				mu.Lock()
@@ -671,15 +672,15 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 			},
 		}
 		rctx, rcancel := context.WithCancel(sctx)
-		r := start(t, rctx, cfg)
-		r.until(t, "handled all 3 visible records", func() bool {
+		r := harness.Start(t, rctx, cfg)
+		r.Until(t, "handled all 3 visible records", func() bool {
 			mu.Lock()
 			n := len(handled)
 			mu.Unlock()
 			return n >= 3
 		})
 		rcancel()
-		if err := r.wait(t, waitFor); err != nil {
+		if err := r.Wait(t, harness.WaitFor); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 
@@ -692,14 +693,14 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 			t.Fatalf("handled offsets = %v, want exactly %v", gotHandled, wantHandled)
 		}
 
-		comm := testenv.Committed(t, e.brokers, group, e.topic)
+		comm := testenv.Committed(t, e.Brokers, group, e.Topic)
 		wantComm := offSuccessor + 1
 		if comm[0] != wantComm {
 			t.Fatalf("committed offset = %d, want %d", comm[0], wantComm)
 		}
 
 		// Produce next transaction Txn 5 at next offset
-		recNext := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-next")}
+		recNext := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-next")}
 		if err := txCl.BeginTransaction(); err != nil {
 			t.Fatalf("BeginTransaction 5: %v", err)
 		}
@@ -715,7 +716,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 		var fmu sync.Mutex
 		var freshHandled []int64
 		freshCfg := offsetkeeper.Config{
-			Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+			Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 			ClientOpts: []kgo.Opt{kgo.FetchIsolationLevel(kgo.ReadCommitted())},
 			Handler: func(_ context.Context, r *kgo.Record) error {
 				fmu.Lock()
@@ -725,15 +726,15 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 			},
 		}
 		fctx, fcancel := context.WithCancel(sctx)
-		fr := start(t, fctx, freshCfg)
-		fr.until(t, "fresh consumer handled new record", func() bool {
+		fr := harness.Start(t, fctx, freshCfg)
+		fr.Until(t, "fresh consumer handled new record", func() bool {
 			fmu.Lock()
 			n := len(freshHandled)
 			fmu.Unlock()
 			return n >= 1
 		})
 		fcancel()
-		if err := fr.wait(t, waitFor); err != nil {
+		if err := fr.Wait(t, harness.WaitFor); err != nil {
 			t.Fatalf("fresh Run: %v", err)
 		}
 
@@ -749,14 +750,14 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 3 (settlement), Guarantee 4 (commit never past unsettled).
 // Review verdict: fix (derive offsets dynamically from produce results/ack to support all brokers including Redpanda).
 func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	txCl := testClient(t, e.brokers,
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	txCl := testClient(t, e.Brokers,
 		kgo.TransactionalID("tx-def-"+testenv.Group(t)),
 		kgo.RecordPartitioner(kgo.ManualPartitioner()),
 	)
 
 	// Txn 1: Commit record 0 ("tx-0")
-	rec0 := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-0")}
+	rec0 := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-0")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 1: %v", err)
 	}
@@ -769,7 +770,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 	off0 := rec0.Offset
 
 	// Txn 2: Abort record ("tx-aborted") -> visible under default isolation
-	recAbort := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-aborted")}
+	recAbort := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-aborted")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 2: %v", err)
 	}
@@ -782,7 +783,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 	offAbort := recAbort.Offset
 
 	// Txn 3: Commit record ("tx-interior") -> interior failing record
-	recInterior := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-interior")}
+	recInterior := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-interior")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 3: %v", err)
 	}
@@ -795,7 +796,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 	offInterior := recInterior.Offset
 
 	// Txn 4: Commit record ("tx-successor") -> visible successor
-	recSuccessor := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-successor")}
+	recSuccessor := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-successor")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 4: %v", err)
 	}
@@ -809,7 +810,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 
 	// Subcase 1: Failing record at offInterior blocks commit, successor never entered
 	t.Run("FailBlocksCommit", func(t *testing.T) {
-		sctx, scancel := context.WithTimeout(ctx, waitFor)
+		sctx, scancel := context.WithTimeout(ctx, harness.WaitFor)
 		defer scancel()
 		group := testenv.Group(t)
 
@@ -817,7 +818,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 		var seenOffsets []int64
 		var seenValues []string
 		cfg := offsetkeeper.Config{
-			Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+			Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 			MaxAttempts: 1,
 			Handler: func(_ context.Context, r *kgo.Record) error {
 				mu.Lock()
@@ -825,7 +826,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 				seenValues = append(seenValues, string(r.Value))
 				mu.Unlock()
 				if r.Offset == offInterior {
-					return errBoom
+					return harness.ErrBoom
 				}
 				return nil
 			},
@@ -834,8 +835,8 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 		if err == nil {
 			t.Fatal("expected error from Run on interior failure")
 		}
-		if !errors.Is(err, errBoom) {
-			t.Fatalf("Run error = %v, want errors.Is errBoom", err)
+		if !errors.Is(err, harness.ErrBoom) {
+			t.Fatalf("Run error = %v, want errors.Is harness.ErrBoom", err)
 		}
 
 		mu.Lock()
@@ -852,19 +853,19 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 			t.Fatalf("handler did not see aborted payload: %v", gotVals)
 		}
 
-		comm := testenv.Committed(t, e.brokers, group, e.topic)
+		comm := testenv.Committed(t, e.Brokers, group, e.Topic)
 		// Offsets off0 and offAbort settled; commit must be offAbort + 1
 		wantComm := offAbort + 1
 		if comm[0] != wantComm {
 			t.Fatalf("committed = %d, want %d (offAbort + 1)", comm[0], wantComm)
 		}
 
-		freshCl := testClient(t, e.brokers,
+		freshCl := testClient(t, e.Brokers,
 			kgo.ConsumerGroup(group),
-			kgo.ConsumeTopics(e.topic),
+			kgo.ConsumeTopics(e.Topic),
 		)
 		var resumedOffs []int64
-		testenv.Eventually(t, waitFor, func() bool {
+		testenv.Eventually(t, harness.WaitFor, func() bool {
 			fs := freshCl.PollFetches(sctx)
 			if err := fs.Err0(); err != nil {
 				t.Fatalf("fetch error: %v", err)
@@ -883,14 +884,14 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 
 	// Subcase 2: Fully settled batch asserts [off0, offAbort, offInterior, offSuccessor]
 	t.Run("FullySettledResumesClean", func(t *testing.T) {
-		sctx, scancel := context.WithTimeout(ctx, waitFor)
+		sctx, scancel := context.WithTimeout(ctx, harness.WaitFor)
 		defer scancel()
 		group := testenv.Group(t)
 
 		var mu sync.Mutex
 		var handled []int64
 		cfg := offsetkeeper.Config{
-			Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+			Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 			Handler: func(_ context.Context, r *kgo.Record) error {
 				mu.Lock()
 				handled = append(handled, r.Offset)
@@ -899,15 +900,15 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 			},
 		}
 		rctx, rcancel := context.WithCancel(sctx)
-		r := start(t, rctx, cfg)
-		r.until(t, "handled all 4 visible records", func() bool {
+		r := harness.Start(t, rctx, cfg)
+		r.Until(t, "handled all 4 visible records", func() bool {
 			mu.Lock()
 			n := len(handled)
 			mu.Unlock()
 			return n >= 4
 		})
 		rcancel()
-		if err := r.wait(t, waitFor); err != nil {
+		if err := r.Wait(t, harness.WaitFor); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 
@@ -920,14 +921,14 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 			t.Fatalf("handled offsets = %v, want exactly %v", gotHandled, wantHandled)
 		}
 
-		comm := testenv.Committed(t, e.brokers, group, e.topic)
+		comm := testenv.Committed(t, e.Brokers, group, e.Topic)
 		wantComm := offSuccessor + 1
 		if comm[0] != wantComm {
 			t.Fatalf("committed offset = %d, want %d", comm[0], wantComm)
 		}
 
 		// Produce next record Txn 5
-		recNext := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-next")}
+		recNext := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-next")}
 		if err := txCl.BeginTransaction(); err != nil {
 			t.Fatalf("BeginTransaction 5: %v", err)
 		}
@@ -942,7 +943,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 		var fmu sync.Mutex
 		var freshHandled []int64
 		freshCfg := offsetkeeper.Config{
-			Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+			Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 			Handler: func(_ context.Context, r *kgo.Record) error {
 				fmu.Lock()
 				freshHandled = append(freshHandled, r.Offset)
@@ -951,15 +952,15 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 			},
 		}
 		fctx, fcancel := context.WithCancel(sctx)
-		fr := start(t, fctx, freshCfg)
-		fr.until(t, "fresh consumer handled new record", func() bool {
+		fr := harness.Start(t, fctx, freshCfg)
+		fr.Until(t, "fresh consumer handled new record", func() bool {
 			fmu.Lock()
 			n := len(freshHandled)
 			fmu.Unlock()
 			return n >= 1
 		})
 		fcancel()
-		if err := fr.wait(t, waitFor); err != nil {
+		if err := fr.Wait(t, harness.WaitFor); err != nil {
 			t.Fatalf("fresh Run: %v", err)
 		}
 
@@ -975,23 +976,23 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 // docs/CONTRACT.md: Guarantee 4 ("highest contiguous settled offset per partition (offset plus one). Never past an unsettled record").
 // Review verdict: fix (check response.Error(), verify low watermark 3, assert [3,4] on failure and [3,4,5] on success, make failure interior).
 func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	admCl := testClient(t, e.brokers)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	admCl := testClient(t, e.Brokers)
 	adm := kadm.NewClient(admCl)
 
 	// Produce 6 records (offsets 0..5)
 	var rs []*kgo.Record
 	for i := 0; i < 6; i++ {
 		rs = append(rs, &kgo.Record{
-			Topic: e.topic, Partition: 0,
+			Topic: e.Topic, Partition: 0,
 			Value: []byte(fmt.Sprintf("v-%d", i)),
 		})
 	}
-	testenv.Produce(t, e.brokers, rs...)
+	testenv.Produce(t, e.Brokers, rs...)
 
 	// Truncate records before offset 3
 	delOffsets := make(kadm.Offsets)
-	delOffsets.AddOffset(e.topic, 0, 3, -1)
+	delOffsets.AddOffset(e.Topic, 0, 3, -1)
 	delResp, err := adm.DeleteRecords(ctx, delOffsets)
 	if err != nil {
 		t.Fatalf("DeleteRecords: %v", err)
@@ -1001,31 +1002,31 @@ func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 	}
 
 	// Verify low watermark is 3 via ListStartOffsets
-	startOffs, err := adm.ListStartOffsets(ctx, e.topic)
+	startOffs, err := adm.ListStartOffsets(ctx, e.Topic)
 	if err != nil {
 		t.Fatalf("ListStartOffsets: %v", err)
 	}
-	if low := startOffs[e.topic][0].Offset; low != 3 {
+	if low := startOffs[e.Topic][0].Offset; low != 3 {
 		t.Fatalf("low watermark offset = %d, want 3", low)
 	}
 
 	// Subcase 1: Failing record at offset 4 after gap (start offset = 3, visible successor is 5)
 	t.Run("FailAfterGapBlocksCommit", func(t *testing.T) {
-		sctx, scancel := context.WithTimeout(ctx, waitFor)
+		sctx, scancel := context.WithTimeout(ctx, harness.WaitFor)
 		defer scancel()
 		group := testenv.Group(t)
 
 		var mu sync.Mutex
 		var seenOffsets []int64
 		cfg := offsetkeeper.Config{
-			Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+			Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 			MaxAttempts: 1,
 			Handler: func(_ context.Context, r *kgo.Record) error {
 				mu.Lock()
 				seenOffsets = append(seenOffsets, r.Offset)
 				mu.Unlock()
 				if r.Offset == 4 {
-					return errBoom
+					return harness.ErrBoom
 				}
 				return nil
 			},
@@ -1034,8 +1035,8 @@ func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error from Run")
 		}
-		if !errors.Is(err, errBoom) {
-			t.Fatalf("Run error = %v, want errors.Is errBoom", err)
+		if !errors.Is(err, harness.ErrBoom) {
+			t.Fatalf("Run error = %v, want errors.Is harness.ErrBoom", err)
 		}
 
 		mu.Lock()
@@ -1048,16 +1049,16 @@ func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 			t.Fatalf("handler seen offsets = %v, want exactly %v", gotSeen, wantSeen)
 		}
 
-		comm := testenv.Committed(t, e.brokers, group, e.topic)
+		comm := testenv.Committed(t, e.Brokers, group, e.Topic)
 		// Offset 3 was settled, so committed offset is 4 (never past 4)
 		if comm[0] != 4 {
 			t.Fatalf("committed offset = %d, want 4", comm[0])
 		}
 
 		// Fresh consumer resuming sees records [4, 5]
-		freshCl := testClient(t, e.brokers, kgo.ConsumerGroup(group), kgo.ConsumeTopics(e.topic))
+		freshCl := testClient(t, e.Brokers, kgo.ConsumerGroup(group), kgo.ConsumeTopics(e.Topic))
 		var resumedOffs []int64
-		testenv.Eventually(t, waitFor, func() bool {
+		testenv.Eventually(t, harness.WaitFor, func() bool {
 			fs := freshCl.PollFetches(sctx)
 			if err := fs.Err0(); err != nil {
 				t.Fatalf("fetch error: %v", err)
@@ -1074,14 +1075,14 @@ func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 
 	// Subcase 2: Fully settled batch asserts [3, 4, 5]
 	t.Run("FullySettled", func(t *testing.T) {
-		sctx, scancel := context.WithTimeout(ctx, waitFor)
+		sctx, scancel := context.WithTimeout(ctx, harness.WaitFor)
 		defer scancel()
 		group := testenv.Group(t)
 
 		var mu sync.Mutex
 		var handled []int64
 		cfg := offsetkeeper.Config{
-			Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+			Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 			Handler: func(_ context.Context, r *kgo.Record) error {
 				mu.Lock()
 				handled = append(handled, r.Offset)
@@ -1090,15 +1091,15 @@ func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 			},
 		}
 		rctx, rcancel := context.WithCancel(sctx)
-		r := start(t, rctx, cfg)
-		r.until(t, "handled records 3, 4, 5", func() bool {
+		r := harness.Start(t, rctx, cfg)
+		r.Until(t, "handled records 3, 4, 5", func() bool {
 			mu.Lock()
 			n := len(handled)
 			mu.Unlock()
 			return n >= 3
 		})
 		rcancel()
-		if err := r.wait(t, waitFor); err != nil {
+		if err := r.Wait(t, harness.WaitFor); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 
@@ -1111,7 +1112,7 @@ func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 			t.Fatalf("handled offsets = %v, want exactly %v", gotHandled, wantHandled)
 		}
 
-		comm := testenv.Committed(t, e.brokers, group, e.topic)
+		comm := testenv.Committed(t, e.Brokers, group, e.Topic)
 		if comm[0] != 6 {
 			t.Fatalf("committed offset = %d, want 6 (end offset)", comm[0])
 		}
@@ -1122,12 +1123,12 @@ func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 4 ("Handlers cannot change the committed offset by modifying their record").
 // Review verdict: fix (compare kadm.FetchOffsets partition LeaderEpoch with captured epoch as well as At).
 func TestEdgeRecords_LeaderEpoch(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "le", 3)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "le", 3)
 
 	var sawEpoch atomic.Int32
 	sawEpoch.Store(-1)
-	cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 		// Capture broker's genuine leader epoch on last record
 		sawEpoch.Store(r.LeaderEpoch)
 		// Tamper with LeaderEpoch in handler copy
@@ -1135,10 +1136,10 @@ func TestEdgeRecords_LeaderEpoch(t *testing.T) {
 		return nil
 	})
 
-	r := start(t, ctx, cfg)
-	r.until(t, "handled records", func() bool { return sawEpoch.Load() >= 0 && e.drained(t) })
-	r.cancel()
-	if err := r.wait(t, waitFor); err != nil {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "handled records", func() bool { return sawEpoch.Load() >= 0 && e.Drained(t) })
+	r.Cancel()
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -1148,14 +1149,14 @@ func TestEdgeRecords_LeaderEpoch(t *testing.T) {
 	}
 
 	// Fetch raw offset response including LeaderEpoch via kadm
-	admCl := testClient(t, e.brokers)
-	resp, err := kadm.NewClient(admCl).FetchOffsets(ctx, e.group)
+	admCl := testClient(t, e.Brokers)
+	resp, err := kadm.NewClient(admCl).FetchOffsets(ctx, e.Group)
 	if err != nil {
 		t.Fatalf("FetchOffsets: %v", err)
 	}
-	partOff, ok := resp[e.topic][0]
+	partOff, ok := resp[e.Topic][0]
 	if !ok {
-		t.Fatalf("topic %s/0 missing from FetchOffsets response", e.topic)
+		t.Fatalf("topic %s/0 missing from FetchOffsets response", e.Topic)
 	}
 	if partOff.Err != nil {
 		t.Fatalf("fetch offset error: %v", partOff.Err)
@@ -1174,12 +1175,12 @@ func TestEdgeRecords_LeaderEpoch(t *testing.T) {
 func TestEdgeRecords_BatchLastRecordFails(t *testing.T) {
 	// Subcase A: Without DLQ
 	t.Run("NoDLQ", func(t *testing.T) {
-		e, ctx := newEnv(t, 1), testCtx(t)
-		e.produce(t, "last", 5) // offsets 0, 1, 2, 3, 4
+		e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+		e.Produce(t, "last", 5) // offsets 0, 1, 2, 3, 4
 
-		cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+		cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 			if r.Offset == 4 { // last record in partition
-				return errBoom
+				return harness.ErrBoom
 			}
 			return nil
 		})
@@ -1189,16 +1190,16 @@ func TestEdgeRecords_BatchLastRecordFails(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error from Run on last record")
 		}
-		mustContain(t, "Run error", err.Error(), e.topic, "offset 4")
+		harness.MustContain(t, "Run error", err.Error(), e.Topic, "offset 4")
 
-		comm := testenv.Committed(t, e.brokers, e.group, e.topic)
+		comm := testenv.Committed(t, e.Brokers, e.Group, e.Topic)
 		// Settled prefix was offsets 0..3, so committed offset must be 4
 		if comm[0] != 4 {
 			t.Fatalf("committed offset = %d, want 4", comm[0])
 		}
 
 		// Fresh consumer receives the failed record
-		freshCl := testClient(t, e.brokers, kgo.ConsumerGroup(e.group), kgo.ConsumeTopics(e.topic))
+		freshCl := testClient(t, e.Brokers, kgo.ConsumerGroup(e.Group), kgo.ConsumeTopics(e.Topic))
 		fs := freshCl.PollFetches(ctx)
 		var resumed []int64
 		fs.EachRecord(func(r *kgo.Record) { resumed = append(resumed, r.Offset) })
@@ -1209,39 +1210,39 @@ func TestEdgeRecords_BatchLastRecordFails(t *testing.T) {
 
 	// Subcase B: With DLQ
 	t.Run("WithDLQ", func(t *testing.T) {
-		e, ctx := newEnv(t, 1), testCtx(t)
-		dlqTopic := testenv.Topic(t, e.brokers, 1)
-		e.produce(t, "last-dlq", 5) // offsets 0..4
+		e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+		dlqTopic := testenv.Topic(t, e.Brokers, 1)
+		e.Produce(t, "last-dlq", 5) // offsets 0..4
 
-		cfg := e.cfg(func(_ context.Context, r *kgo.Record) error {
+		cfg := e.Cfg(func(_ context.Context, r *kgo.Record) error {
 			if r.Offset == 4 {
-				return errBoom
+				return harness.ErrBoom
 			}
 			return nil
 		})
 		cfg.DLQTopic = dlqTopic
 		cfg.MaxAttempts = 1
 
-		r := start(t, ctx, cfg)
-		r.until(t, "last record dead-lettered and batch drained", func() bool {
-			return e.total(t, dlqTopic) == 1 && e.drained(t)
+		r := harness.Start(t, ctx, cfg)
+		r.Until(t, "last record dead-lettered and batch drained", func() bool {
+			return e.Total(t, dlqTopic) == 1 && e.Drained(t)
 		})
-		r.cancel()
-		if err := r.wait(t, waitFor); err != nil {
+		r.Cancel()
+		if err := r.Wait(t, harness.WaitFor); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 
-		comm := testenv.Committed(t, e.brokers, e.group, e.topic)
+		comm := testenv.Committed(t, e.Brokers, e.Group, e.Topic)
 		if comm[0] != 5 {
 			t.Fatalf("committed offset = %d, want 5", comm[0])
 		}
 
 		// Identify DLQ source offset 4
-		dlqRecs := testenv.Records(t, e.brokers, dlqTopic)
+		dlqRecs := testenv.Records(t, e.Brokers, dlqTopic)
 		if len(dlqRecs) != 1 {
 			t.Fatalf("DLQ records count = %d, want 1", len(dlqRecs))
 		}
-		if offStr, ok := header(dlqRecs[0], dlq.HeaderSourceOffset); !ok || offStr != "4" {
+		if offStr, ok := harness.Header(dlqRecs[0], dlq.HeaderSourceOffset); !ok || offStr != "4" {
 			t.Fatalf("DLQ record HeaderSourceOffset = %q (ok=%v), want 4", offStr, ok)
 		}
 	})
@@ -1251,14 +1252,14 @@ func TestEdgeRecords_BatchLastRecordFails(t *testing.T) {
 // docs/CONTRACT.md: Guarantee 6 (Shutdown). Docs are silent on empty topics; safe behavior: no hang, no panic, clean return on cancel.
 // Review verdict: fix (wait on an assignment or first Fetch for this topic before cancel).
 func TestEdgeRecords_ZeroRecordTopic(t *testing.T) {
-	e, ctx := newEnv(t, 3), testCtx(t) // 3 empty partitions
+	e, ctx := harness.NewEnv(t, 3), harness.Ctx(t) // 3 empty partitions
 
 	var mu sync.Mutex
 	var callCount int
 	assigned := make(chan struct{})
 	var assignedOnce sync.Once
 
-	cfg := e.cfg(func(_ context.Context, _ *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, _ *kgo.Record) error {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -1266,14 +1267,14 @@ func TestEdgeRecords_ZeroRecordTopic(t *testing.T) {
 	})
 	cfg.ClientOpts = []kgo.Opt{
 		kgo.OnPartitionsAssigned(func(_ context.Context, _ *kgo.Client, parts map[string][]int32) {
-			if len(parts[e.topic]) > 0 {
+			if len(parts[e.Topic]) > 0 {
 				assignedOnce.Do(func() { close(assigned) })
 			}
 		}),
 	}
 
 	rctx, cancel := context.WithCancel(ctx)
-	r := start(t, rctx, cfg)
+	r := harness.Start(t, rctx, cfg)
 
 	// Wait until assignment is active on this topic before cancelling
 	select {
@@ -1283,7 +1284,7 @@ func TestEdgeRecords_ZeroRecordTopic(t *testing.T) {
 	}
 
 	cancel()
-	if err := r.wait(t, waitFor); err != nil {
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run returned error on 0-record topic: %v", err)
 	}
 
@@ -1293,7 +1294,7 @@ func TestEdgeRecords_ZeroRecordTopic(t *testing.T) {
 		t.Fatalf("handler called %d times on empty topic", callCount)
 	}
 
-	comm := testenv.Committed(t, e.brokers, e.group, e.topic)
+	comm := testenv.Committed(t, e.Brokers, e.Group, e.Topic)
 	if len(comm) != 0 {
 		t.Fatalf("committed offsets = %v on empty topic, want none", comm)
 	}
@@ -1307,7 +1308,7 @@ func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 	topicA := testenv.Topic(t, b, 1)
 	topicB := testenv.Topic(t, b, 1)
 	group := testenv.Group(t)
-	ctx := testCtx(t)
+	ctx := harness.Ctx(t)
 
 	var mu sync.Mutex
 	type recordID struct {
@@ -1326,7 +1327,7 @@ func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 			mu.Unlock()
 			// Fail topicA on offset 1; all other records succeed
 			if r.Topic == topicA && r.Offset == 1 {
-				return errBoom
+				return harness.ErrBoom
 			}
 			return nil
 		},
@@ -1335,7 +1336,7 @@ func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 	// Start runner
 	rctx, rcancel := context.WithCancel(ctx)
 	defer rcancel()
-	r := start(t, rctx, cfg)
+	r := harness.Start(t, rctx, cfg)
 
 	// Wave 1: Produce A-0 to topicA and B-0, B-1, B-2 to topicB (overlapping offset 0)
 	testenv.Produce(t, b, &kgo.Record{Topic: topicA, Partition: 0, Value: []byte("A-0")})
@@ -1346,7 +1347,7 @@ func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 	testenv.Produce(t, b, rsB...)
 
 	// Wait until Wave 1 is fully handled and committed
-	r.until(t, "Wave 1 handled", func() bool {
+	r.Until(t, "Wave 1 handled", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		var countA, countB int
@@ -1367,13 +1368,13 @@ func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 		&kgo.Record{Topic: topicA, Partition: 0, Value: []byte("A-2")},
 	)
 
-	// Run must exit with errBoom from topicA
-	err := r.wait(t, waitFor)
+	// Run must exit with harness.ErrBoom from topicA
+	err := r.Wait(t, harness.WaitFor)
 	if err == nil {
 		t.Fatal("expected error from Run on topicA failure")
 	}
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("Run error = %v, want errors.Is errBoom", err)
+	if !errors.Is(err, harness.ErrBoom) {
+		t.Fatalf("Run error = %v, want errors.Is harness.ErrBoom", err)
 	}
 
 	mu.Lock()
@@ -1414,7 +1415,7 @@ func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 	// Fresh consumer resuming on both topics: receives only uncommitted topicA records (1, 2)
 	freshCl := testClient(t, b, kgo.ConsumerGroup(group), kgo.ConsumeTopics(topicA, topicB))
 	var freshA, freshB []string
-	testenv.Eventually(t, waitFor, func() bool {
+	testenv.Eventually(t, harness.WaitFor, func() bool {
 		fs := freshCl.PollFetches(ctx)
 		if err := fs.Err0(); err != nil {
 			t.Fatalf("fresh fetch error: %v", err)
@@ -1442,15 +1443,15 @@ func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 // Assert that the handler never sees the successor before restart, then verify both redeliver in order.
 // docs/CONTRACT.md: Guarantee 2 (order per partition), Guarantee 3 (settlement), Guarantee 4 (commit).
 func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	txCl := testClient(t, e.brokers,
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	txCl := testClient(t, e.Brokers,
 		kgo.TransactionalID("tx-int-"+testenv.Group(t)),
 		kgo.RecordPartitioner(kgo.ManualPartitioner()),
 	)
 
 	// Produce 4 transactions to partition 0:
 	// Tx 1: Commit ("tx-0")
-	rec0 := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-0")}
+	rec0 := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-0")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 1: %v", err)
 	}
@@ -1463,7 +1464,7 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	off0 := rec0.Offset
 
 	// Tx 2: Abort ("tx-aborted") -> control markers / gap
-	recAbort := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-aborted")}
+	recAbort := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-aborted")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 2: %v", err)
 	}
@@ -1475,7 +1476,7 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	}
 
 	// Tx 3: Commit ("tx-4-fail") -> interior failing record
-	recFail := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-4-fail")}
+	recFail := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-4-fail")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 3: %v", err)
 	}
@@ -1487,7 +1488,7 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	}
 
 	// Tx 4: Commit ("tx-6-successor") -> visible successor in same partition/batch
-	recSuccessor := &kgo.Record{Topic: e.topic, Partition: 0, Value: []byte("tx-6-successor")}
+	recSuccessor := &kgo.Record{Topic: e.Topic, Partition: 0, Value: []byte("tx-6-successor")}
 	if err := txCl.BeginTransaction(); err != nil {
 		t.Fatalf("BeginTransaction 4: %v", err)
 	}
@@ -1503,7 +1504,7 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	var mu sync.Mutex
 	var seenValues []string
 	cfg := offsetkeeper.Config{
-		Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+		Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 		MaxAttempts: 1,
 		ClientOpts:  []kgo.Opt{kgo.FetchIsolationLevel(kgo.ReadCommitted())},
 		Handler: func(_ context.Context, r *kgo.Record) error {
@@ -1511,7 +1512,7 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 			seenValues = append(seenValues, string(r.Value))
 			mu.Unlock()
 			if string(r.Value) == "tx-4-fail" {
-				return errBoom
+				return harness.ErrBoom
 			}
 			return nil
 		},
@@ -1522,8 +1523,8 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from Run on interior failure")
 	}
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("Run error = %v, want errors.Is errBoom", err)
+	if !errors.Is(err, harness.ErrBoom) {
+		t.Fatalf("Run error = %v, want errors.Is harness.ErrBoom", err)
 	}
 
 	mu.Lock()
@@ -1537,7 +1538,7 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	}
 
 	// Settle prefix was tx-0 (offset off0), so committed offset is off0 + 1
-	comm := testenv.Committed(t, e.brokers, group, e.topic)
+	comm := testenv.Committed(t, e.Brokers, group, e.Topic)
 	wantComm := off0 + 1
 	if comm[0] != wantComm {
 		t.Fatalf("committed offset = %d, want %d", comm[0], wantComm)
@@ -1547,7 +1548,7 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	var restartMu sync.Mutex
 	var restartSeen []string
 	restartCfg := offsetkeeper.Config{
-		Brokers: e.brokers, Group: group, Topics: []string{e.topic},
+		Brokers: e.Brokers, Group: group, Topics: []string{e.Topic},
 		ClientOpts: []kgo.Opt{kgo.FetchIsolationLevel(kgo.ReadCommitted())},
 		Handler: func(_ context.Context, r *kgo.Record) error {
 			restartMu.Lock()
@@ -1557,15 +1558,15 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 		},
 	}
 	rctx, rcancel := context.WithCancel(ctx)
-	r := start(t, rctx, restartCfg)
-	r.until(t, "both redelivered in order", func() bool {
+	r := harness.Start(t, rctx, restartCfg)
+	r.Until(t, "both redelivered in order", func() bool {
 		restartMu.Lock()
 		n := len(restartSeen)
 		restartMu.Unlock()
 		return n >= 2
 	})
 	rcancel()
-	if err := r.wait(t, waitFor); err != nil {
+	if err := r.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("restart Run: %v", err)
 	}
 
@@ -1579,7 +1580,7 @@ func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	}
 
 	// Verify final checkpoint after full settlement is offSuccessor + 1
-	finalComm := testenv.Committed(t, e.brokers, group, e.topic)
+	finalComm := testenv.Committed(t, e.Brokers, group, e.Topic)
 	wantFinalComm := offSuccessor + 1
 	if finalComm[0] != wantFinalComm {
 		t.Fatalf("final committed offset = %d, want %d", finalComm[0], wantFinalComm)

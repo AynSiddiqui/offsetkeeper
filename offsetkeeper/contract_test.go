@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -19,250 +18,46 @@ import (
 	"testing"
 	"time"
 
-	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 
-	"github.com/AynSiddiqui/offsetkeeper"
 	"github.com/AynSiddiqui/offsetkeeper/internal/dlq"
+	"github.com/AynSiddiqui/offsetkeeper/internal/harness"
 	"github.com/AynSiddiqui/offsetkeeper/internal/testenv"
+	"github.com/AynSiddiqui/offsetkeeper/offsetkeeper"
 )
-
-// Every test runs under testTimeout; waits inside use shorter limits.
-const (
-	testTimeout = 45 * time.Second
-	waitFor     = 30 * time.Second
-)
-
-var errBoom = errors.New("boom")
 
 // fastGroup lets a SIGKILLed member expire quickly on real brokers.
 var fastGroup = []kgo.Opt{kgo.SessionTimeout(6 * time.Second)}
 
-// ---- helpers ----------------------------------------------------------------
-
-func testCtx(t *testing.T) context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	t.Cleanup(cancel)
-	return ctx
-}
-
-type env struct {
-	brokers      []string
-	topic, group string
-	partitions   int32
-}
-
-func newEnv(t *testing.T, partitions int32) env {
-	t.Helper()
-	b := testenv.Brokers(t)
-	return env{b, testenv.Topic(t, b, partitions), testenv.Group(t), partitions}
-}
-
-func (e env) cfg(h offsetkeeper.Handler) offsetkeeper.Config {
-	return offsetkeeper.Config{
-		Brokers: e.brokers, Group: e.group, Topics: []string{e.topic}, Handler: h,
-		MaxAttempts: 3, Backoff: time.Millisecond,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-}
-
-// produce writes n records to every partition in partitions (all if empty);
-// values are "<prefix>-<partition>-<i>", the key is "key-<i>".
-func (e env) produce(t *testing.T, prefix string, n int, partitions ...int32) {
-	t.Helper()
-	if len(partitions) == 0 {
-		for p := range e.partitions {
-			partitions = append(partitions, p)
-		}
-	}
-	var rs []*kgo.Record
-	for _, p := range partitions {
-		for i := range n {
-			rs = append(rs, &kgo.Record{
-				Topic: e.topic, Partition: p,
-				Key: fmt.Appendf(nil, "key-%d", i), Value: fmt.Appendf(nil, "%s-%d-%d", prefix, p, i),
-			})
-		}
-	}
-	testenv.Produce(t, e.brokers, rs...)
-}
-
-func (e env) committed(t *testing.T) map[int32]int64 {
-	t.Helper()
-	return testenv.Committed(t, e.brokers, e.group, e.topic)
-}
-
-// drained reports whether every partition's committed offset equals its end.
-func (e env) drained(t *testing.T) bool {
-	t.Helper()
-	c := e.committed(t)
-	for p, end := range testenv.End(t, e.brokers, e.topic) {
-		if c[p] != end {
-			return false
-		}
-	}
-	return true
-}
-
-func (e env) total(t *testing.T, topic string) (n int) {
-	t.Helper()
-	for _, end := range testenv.End(t, e.brokers, topic) {
-		n += int(end)
-	}
-	return n
-}
-
-type seen struct {
-	partition int32
-	offset    int64
-	value     string
-	who       string
-}
-
-// calls records handler invocations.
-type calls struct {
-	mu sync.Mutex
-	xs []seen
-}
-
-func (c *calls) add(r *kgo.Record, who string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.xs = append(c.xs, seen{r.Partition, r.Offset, string(r.Value), who})
-}
-
-func (c *calls) count(f func(seen) bool) (n int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, x := range c.xs {
-		if f(x) {
-			n++
-		}
-	}
-	return n
-}
-
-func (c *calls) value(v string) int { return c.count(func(s seen) bool { return s.value == v }) }
-func (c *calls) offset(o int64) int { return c.count(func(s seen) bool { return s.offset == o }) }
-func (c *calls) past(o int64) int   { return c.count(func(s seen) bool { return s.offset > o }) }
-func (c *calls) total() int         { return c.count(func(seen) bool { return true }) }
-func (c *calls) offsets(p int32) (os []int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, x := range c.xs {
-		if x.partition == p {
-			os = append(os, x.offset)
-		}
-	}
-	return os
-}
-
-// runner runs offsetkeeper.Run in a goroutine.
-type runner struct {
-	cancel context.CancelFunc
-	exited chan struct{}
-	err    error // valid once exited is closed
-}
-
-func start(t *testing.T, ctx context.Context, cfg offsetkeeper.Config) *runner {
-	t.Helper()
-	ctx, cancel := context.WithCancel(ctx)
-	r := &runner{cancel: cancel, exited: make(chan struct{})}
-	go func() { r.err = offsetkeeper.Run(ctx, cfg); close(r.exited) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-r.exited:
-		case <-time.After(15 * time.Second):
-			t.Error("Run did not return within 15s of cancel")
-		}
-	})
-	return r
-}
-
-// wait returns Run's result, failing t if Run is still going after d.
-func (r *runner) wait(t *testing.T, d time.Duration) error {
-	t.Helper()
-	select {
-	case <-r.exited:
-		return r.err
-	case <-time.After(d):
-		t.Fatalf("Run still running after %s", d)
-		return nil
-	}
-}
-
-// until waits for cond while Run keeps running; an early exit fails t at once.
-func (r *runner) until(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	testenv.Eventually(t, waitFor, func() bool {
-		select {
-		case <-r.exited:
-			t.Fatalf("waiting for %s: Run exited early: %v", what, r.err)
-		default:
-		}
-		return cond()
-	}, what)
-}
-
-func (r *runner) running() bool {
-	select {
-	case <-r.exited:
-		return false
-	default:
-		return true
-	}
-}
-
-func header(r *kgo.Record, key string) (string, bool) {
-	for _, h := range r.Headers {
-		if h.Key == key {
-			return string(h.Value), true
-		}
-	}
-	return "", false
-}
-
-func mustContain(t *testing.T, what, s string, subs ...string) {
-	t.Helper()
-	for _, sub := range subs {
-		if !strings.Contains(s, sub) {
-			t.Errorf("%s %q should contain %q", what, s, sub)
-		}
-	}
-}
-
-// ---- tests ------------------------------------------------------------------
-
 // A record that fails after MaxAttempts without a DLQ stops Run; nothing at or
 // past it is committed or handled.
 func TestNoCommitPastFailedRecord(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "r", 5)
-	var c calls
-	r := start(t, ctx, e.cfg(func(_ context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "r", 5)
+	var c harness.Calls
+	r := harness.Start(t, ctx, e.Cfg(func(_ context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		if rec.Offset == 2 {
-			return errBoom
+			return harness.ErrBoom
 		}
 		return nil
 	}))
-	err := r.wait(t, waitFor)
-	if !errors.Is(err, errBoom) {
+	err := r.Wait(t, harness.WaitFor)
+	if !errors.Is(err, harness.ErrBoom) {
 		t.Fatalf("Run returned %v, want an error wrapping the handler error", err)
 	}
-	mustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 2", e.topic)) // names topic, partition and offset; "2" alone matches the topic name digits
-	if n := c.offset(2); n != 3 {
+	harness.MustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 2", e.Topic)) // names topic, partition and offset; "2" alone matches the topic name digits
+	if n := c.Offset(2); n != 3 {
 		t.Errorf("failed record handled %d times, want MaxAttempts=3", n)
 	}
-	if n := c.past(2); n != 0 {
+	if n := c.Past(2); n != 0 {
 		t.Errorf("%d records past the failed one were handled", n)
 	}
 	// Offsets 0 and 1 settled; Run commits that prefix on its error exit.
-	if got := e.committed(t)[0]; got != 2 {
+	if got := e.Committed(t)[0]; got != 2 {
 		t.Errorf("committed %d, want exactly 2 (offsets 0-1 settled, 2 failed)", got)
 	}
 }
@@ -301,11 +96,11 @@ func TestHelperCrashChild(t *testing.T) {
 
 // A real SIGKILL mid-batch leaves the batch uncommitted; a restart re-handles it.
 func TestCrashBeforeCommitRedelivers(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "r", crashRecords)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "r", crashRecords)
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperCrashChild$", "-test.timeout=60s")
-	cmd.Env = append(os.Environ(), crashEnv+"="+strings.Join([]string{strings.Join(e.brokers, ","), e.topic, e.group}, "|"))
+	cmd.Env = append(os.Environ(), crashEnv+"="+strings.Join([]string{strings.Join(e.Brokers, ","), e.Topic, e.Group}, "|"))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
@@ -334,7 +129,7 @@ func TestCrashBeforeCommitRedelivers(t *testing.T) {
 	}()
 
 	got := map[int64]bool{}
-	deadline := time.After(waitFor)
+	deadline := time.After(harness.WaitFor)
 	for len(got) < crashBlockAt {
 		select {
 		case o, ok := <-handled:
@@ -345,7 +140,7 @@ func TestCrashBeforeCommitRedelivers(t *testing.T) {
 			}
 			got[o] = true
 		case <-deadline:
-			t.Fatalf("child handled only %d of %d records in %s", len(got), crashBlockAt, waitFor)
+			t.Fatalf("child handled only %d of %d records in %s", len(got), crashBlockAt, harness.WaitFor)
 		}
 	}
 	if err := cmd.Process.Kill(); err != nil { // SIGKILL: no deferred cleanup, no final commit
@@ -355,54 +150,38 @@ func TestCrashBeforeCommitRedelivers(t *testing.T) {
 	}
 	_ = cmd.Wait()
 
-	from := e.committed(t)[0]
+	from := e.Committed(t)[0]
 	if from > crashBlockAt {
 		t.Fatalf("committed %d, past the unsettled record at offset %d", from, crashBlockAt)
 	}
 
-	var c calls
-	r := start(t, ctx, func() offsetkeeper.Config {
-		cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error { c.add(rec, ""); return nil })
+	var c harness.Calls
+	r := harness.Start(t, ctx, func() offsetkeeper.Config {
+		cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error { c.Add(rec, ""); return nil })
 		cfg.ClientOpts = fastGroup
 		return cfg
 	}())
-	r.until(t, "restarted Run to drain the topic", func() bool { return e.drained(t) })
+	r.Until(t, "restarted Run to drain the topic", func() bool { return e.Drained(t) })
 	for o := from; o < crashRecords; o++ {
-		if c.offset(o) == 0 {
+		if c.Offset(o) == 0 {
 			t.Errorf("offset %d was not redelivered after the crash (committed before restart: %d)", o, from)
 		}
 	}
-}
-
-func groupState(t *testing.T, brokers []string, group string) (state string, members int) {
-	t.Helper()
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cl.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	gs, err := kadm.NewClient(cl).DescribeGroups(ctx, group)
-	if err != nil || gs[group].Err != nil {
-		t.Fatalf("describe group: %v / %v", err, gs[group].Err)
-	}
-	return gs[group].State, len(gs[group].Members)
 }
 
 // A member joining while a handler blocks must not get records the first member
 // is still handling: the rebalance waits for the batch to be settled and committed.
 func TestRebalanceDuringHandler(t *testing.T) {
 	const per = 8
-	e, ctx := newEnv(t, 4), testCtx(t)
-	e.produce(t, "w1", per)
+	e, ctx := harness.NewEnv(t, 4), harness.Ctx(t)
+	e.Produce(t, "w1", per)
 
-	var c calls
+	var c harness.Calls
 	var blocking atomic.Bool
 	blocked, release := make(chan struct{}), make(chan struct{})
 	handler := func(who string) offsetkeeper.Handler {
 		return func(ctx context.Context, r *kgo.Record) error {
-			c.add(r, who)
+			c.Add(r, who)
 			if who == "A" && blocking.CompareAndSwap(false, true) {
 				close(blocked)
 				select {
@@ -414,12 +193,12 @@ func TestRebalanceDuringHandler(t *testing.T) {
 			return nil
 		}
 	}
-	a := start(t, ctx, e.cfg(handler("A")))
-	a.until(t, "member A to block in a handler", func() bool { return blocking.Load() })
+	a := harness.Start(t, ctx, e.Cfg(handler("A")))
+	a.Until(t, "member A to block in a handler", func() bool { return blocking.Load() })
 	<-blocked
-	b := start(t, ctx, e.cfg(handler("B")))
-	a.until(t, "B's join to start a rebalance", func() bool {
-		state, members := groupState(t, e.brokers, e.group)
+	b := harness.Start(t, ctx, e.Cfg(handler("B")))
+	a.Until(t, "B's join to start a rebalance", func() bool {
+		state, members := harness.GroupState(t, e.Brokers, e.Group)
 		return state == "PreparingRebalance" || members == 2
 	})
 	// Hold A's batch open while B gets a chance to (wrongly) be handed A's partitions.
@@ -430,43 +209,43 @@ func TestRebalanceDuringHandler(t *testing.T) {
 		case <-window.C:
 			held = false
 		case <-tick.C:
-			if n := c.count(func(s seen) bool { return s.who == "B" }); n != 0 {
+			if n := c.Count(func(s harness.Seen) bool { return s.Who == "B" }); n != 0 {
 				t.Fatalf("B handled %d records while A's batch was still open: the rebalance did not wait", n)
 			}
 		}
 	}
 	close(release)
 
-	a.until(t, "wave 1 settled and the group stable with 2 members", func() bool {
-		state, members := groupState(t, e.brokers, e.group)
-		return state == "Stable" && members == 2 && e.drained(t)
+	a.Until(t, "wave 1 settled and the group stable with 2 members", func() bool {
+		state, members := harness.GroupState(t, e.Brokers, e.Group)
+		return state == "Stable" && members == 2 && e.Drained(t)
 	})
-	if n := c.count(func(s seen) bool { return s.who == "B" }); n != 0 {
+	if n := c.Count(func(s harness.Seen) bool { return s.Who == "B" }); n != 0 {
 		t.Errorf("B handled %d records of wave 1: the rebalance did not wait for A's batch", n)
 	}
 
-	e.produce(t, "w2", 4)
-	a.until(t, "wave 2 drained", func() bool { return e.drained(t) })
-	b.until(t, "wave 2 drained", func() bool { return e.drained(t) })
-	for p := range e.partitions {
+	e.Produce(t, "w2", 4)
+	a.Until(t, "wave 2 drained", func() bool { return e.Drained(t) })
+	b.Until(t, "wave 2 drained", func() bool { return e.Drained(t) })
+	for p := range e.Partitions {
 		for i := range per {
-			if v := fmt.Sprintf("w1-%d-%d", p, i); c.value(v) == 0 {
+			if v := fmt.Sprintf("w1-%d-%d", p, i); c.Value(v) == 0 {
 				t.Errorf("%s never handled", v)
 			}
 		}
 		for i := range 4 {
-			if v := fmt.Sprintf("w2-%d-%d", p, i); c.value(v) == 0 {
+			if v := fmt.Sprintf("w2-%d-%d", p, i); c.Value(v) == 0 {
 				t.Errorf("%s never handled", v)
 			}
 		}
 	}
 	for _, who := range []string{"A", "B"} {
-		if n := c.count(func(s seen) bool { return s.who == who && strings.HasPrefix(s.value, "w2") }); n == 0 {
+		if n := c.Count(func(s harness.Seen) bool { return s.Who == who && strings.HasPrefix(s.Value, "w2") }); n == 0 {
 			t.Errorf("member %s handled no wave-2 records", who)
 		}
 	}
-	for p, end := range testenv.End(t, e.brokers, e.topic) {
-		if got := e.committed(t)[p]; got != end {
+	for p, end := range testenv.End(t, e.Brokers, e.Topic) {
+		if got := e.Committed(t)[p]; got != end {
 			t.Errorf("partition %d committed %d, end %d", p, got, end)
 		}
 	}
@@ -474,8 +253,8 @@ func TestRebalanceDuringHandler(t *testing.T) {
 
 // Publish returns only after acks, so every record is readable; a missing topic is an error.
 func TestProduceIsAcknowledged(t *testing.T) {
-	e, ctx := newEnv(t, 2), testCtx(t)
-	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(e.brokers...), kgo.UnknownTopicRetries(1))
+	e, ctx := harness.NewEnv(t, 2), harness.Ctx(t)
+	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(e.Brokers...), kgo.UnknownTopicRetries(1))
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
 	}
@@ -483,13 +262,13 @@ func TestProduceIsAcknowledged(t *testing.T) {
 
 	var rs []*kgo.Record
 	for i := range 5 {
-		rs = append(rs, &kgo.Record{Topic: e.topic, Key: fmt.Appendf(nil, "k%d", i), Value: fmt.Appendf(nil, "v%d", i)})
+		rs = append(rs, &kgo.Record{Topic: e.Topic, Key: fmt.Appendf(nil, "k%d", i), Value: fmt.Appendf(nil, "v%d", i)})
 	}
 	if err := p.Publish(ctx, rs...); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	got := map[string]bool{}
-	for _, r := range testenv.Records(t, e.brokers, e.topic) {
+	for _, r := range testenv.Records(t, e.Brokers, e.Topic) {
 		got[string(r.Key)+"="+string(r.Value)] = true
 	}
 	for i := range 5 {
@@ -500,7 +279,7 @@ func TestProduceIsAcknowledged(t *testing.T) {
 
 	mctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	err = p.Publish(mctx, &kgo.Record{Topic: e.topic + ".missing", Value: []byte("x")})
+	err = p.Publish(mctx, &kgo.Record{Topic: e.Topic + ".missing", Value: []byte("x")})
 	if err == nil {
 		t.Error("Publish to a missing topic returned nil")
 	} else if errors.Is(err, context.DeadlineExceeded) {
@@ -512,8 +291,8 @@ func TestProduceIsAcknowledged(t *testing.T) {
 
 // A nil record passed to Publish returns an error naming its index; no records are produced.
 func TestPublisherNilRecord(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(e.brokers...))
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(e.Brokers...))
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
 	}
@@ -525,45 +304,45 @@ func TestPublisherNilRecord(t *testing.T) {
 		t.Errorf("Publish(nil) err = %v, want %q", err, want)
 	}
 
-	validRec := &kgo.Record{Topic: e.topic, Value: []byte("val")}
+	validRec := &kgo.Record{Topic: e.Topic, Value: []byte("val")}
 	err = p.Publish(ctx, validRec, nil)
 	want1 := "offsetkeeper: publish: nil record at index 1"
 	if err == nil || err.Error() != want1 {
 		t.Errorf("Publish(valid, nil) err = %v, want %q", err, want1)
 	}
 
-	if recs := testenv.Records(t, e.brokers, e.topic); len(recs) != 0 {
+	if recs := testenv.Records(t, e.Brokers, e.Topic); len(recs) != 0 {
 		t.Errorf("Publish produced %d records on nil record error, want 0", len(recs))
 	}
 }
 
 // If the DLQ write fails, the source record stays unsettled and Run returns an error.
 func TestFailedDLQPublishDoesNotSettleSource(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "r", 3)
-	var c calls
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "r", 3)
+	var c harness.Calls
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		if rec.Offset == 1 {
-			return errBoom
+			return harness.ErrBoom
 		}
 		return nil
 	})
-	cfg.DLQTopic = e.topic + ".dlq-missing" // never created
+	cfg.DLQTopic = e.Topic + ".dlq-missing" // never created
 	cfg.ClientOpts = []kgo.Opt{kgo.UnknownTopicRetries(1)}
-	err := start(t, ctx, cfg).wait(t, waitFor)
+	err := harness.Start(t, ctx, cfg).Wait(t, harness.WaitFor)
 	if err == nil {
 		t.Fatal("Run returned nil though the DLQ write failed")
 	}
-	mustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 1", e.topic))
-	if n := c.offset(1); n != 3 {
+	harness.MustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 1", e.Topic))
+	if n := c.Offset(1); n != 3 {
 		t.Errorf("failed record handled %d times, want 3", n)
 	}
-	if n := c.past(1); n != 0 {
+	if n := c.Past(1); n != 0 {
 		t.Errorf("%d records past the unsettled one were handled", n)
 	}
 	// Offset 0 settled; offset 1's DLQ write failed, so it is not.
-	if got := e.committed(t)[0]; got != 1 {
+	if got := e.Committed(t)[0]; got != 1 {
 		t.Errorf("committed %d, want exactly 1 (offset 0 settled, 1's DLQ write failed)", got)
 	}
 }
@@ -577,16 +356,16 @@ func TestShutdownDrains(t *testing.T) { shutdownDrains(t, false) }
 func TestShutdownDrainsWithDLQ(t *testing.T) { shutdownDrains(t, true) }
 
 func shutdownDrains(t *testing.T, withDLQ bool) {
-	e, ctx := newEnv(t, 1), testCtx(t)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
 	dlqTopic := ""
 	if withDLQ {
-		dlqTopic = testenv.Topic(t, e.brokers, 1)
+		dlqTopic = testenv.Topic(t, e.Brokers, 1)
 	}
-	e.produce(t, "r", 6)
-	var c calls
+	e.Produce(t, "r", 6)
+	var c harness.Calls
 	var reached atomic.Bool
-	cfg := e.cfg(func(ctx context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	cfg := e.Cfg(func(ctx context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		if rec.Offset < 3 {
 			return nil
 		}
@@ -595,23 +374,23 @@ func shutdownDrains(t *testing.T, withDLQ bool) {
 		return ctx.Err()
 	})
 	cfg.DLQTopic = dlqTopic
-	r := start(t, ctx, cfg)
-	r.until(t, "handler to block at offset 3", reached.Load)
-	r.cancel()
-	if err := r.wait(t, 15*time.Second); err != nil {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "handler to block at offset 3", reached.Load)
+	r.Cancel()
+	if err := r.Wait(t, 15*time.Second); err != nil {
 		t.Fatalf("Run returned %v after cancel, want nil", err)
 	}
-	if got := e.committed(t)[0]; got != 3 {
+	if got := e.Committed(t)[0]; got != 3 {
 		t.Errorf("committed %d, want 3 (offsets 0-2 settled)", got)
 	}
-	if n := c.offset(3); n != 1 {
+	if n := c.Offset(3); n != 1 {
 		t.Errorf("record 3 handled %d times, want 1 (no retry after cancel)", n)
 	}
-	if n := c.past(3); n != 0 {
+	if n := c.Past(3); n != 0 {
 		t.Errorf("%d records after the blocked one were handled after cancel", n)
 	}
 	if withDLQ {
-		if n := e.total(t, dlqTopic); n != 0 {
+		if n := e.Total(t, dlqTopic); n != 0 {
 			t.Errorf("DLQ has %d records after shutdown, want 0 (a cancel is not a bad record)", n)
 		}
 	}
@@ -664,16 +443,16 @@ func (l *eventLog) OnBrokerWrite(_ kgo.BrokerMetadata, key int16, _ int, _, _ ti
 // must come after the ack; a poison later in the log could be passed by an
 // earlier, legitimate commit of the records before it.
 func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
 	hdrs := []kgo.RecordHeader{{Key: "h1", Value: []byte("v1")}, {Key: "h2", Value: []byte("v2")}}
-	testenv.Produce(t, e.brokers,
-		&kgo.Record{Topic: e.topic, Key: []byte("k1"), Value: []byte("poison"), Headers: hdrs},
-		&kgo.Record{Topic: e.topic, Value: []byte("ok-1")},
-		&kgo.Record{Topic: e.topic, Value: []byte("ok-2")})
+	testenv.Produce(t, e.Brokers,
+		&kgo.Record{Topic: e.Topic, Key: []byte("k1"), Value: []byte("poison"), Headers: hdrs},
+		&kgo.Record{Topic: e.Topic, Value: []byte("ok-1")},
+		&kgo.Record{Topic: e.Topic, Value: []byte("ok-2")})
 
 	log := &eventLog{}
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
 		if string(rec.Value) == "poison" {
 			return errors.New("kaboom")
 		}
@@ -683,8 +462,8 @@ func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
 	cfg.ClientOpts = []kgo.Opt{kgo.WithHooks(log)}
 	logs := &syncBuf{}
 	cfg.Logger = slog.New(slog.NewJSONHandler(logs, nil))
-	r := start(t, ctx, cfg)
-	r.until(t, "source drained", func() bool { return e.drained(t) })
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "source drained", func() bool { return e.Drained(t) })
 
 	ack, commit := -1, -1
 	for i, ev := range log.snapshot() {
@@ -699,7 +478,7 @@ func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
 		t.Errorf("want DLQ ack before first OffsetCommit, got events %v", log.snapshot())
 	}
 
-	recs := testenv.Records(t, e.brokers, dlqTopic)
+	recs := testenv.Records(t, e.Brokers, dlqTopic)
 	if len(recs) != 1 {
 		t.Fatalf("DLQ has %d records, want 1", len(recs))
 	}
@@ -710,15 +489,15 @@ func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
 	// Literal names on purpose: renaming a constant must fail this test.
 	want := map[string]string{
 		"h1": "v1", "h2": "v2",
-		"offsetkeeper.source.topic": e.topic, "offsetkeeper.source.partition": "0", "offsetkeeper.source.offset": "0",
+		"offsetkeeper.source.topic": e.Topic, "offsetkeeper.source.partition": "0", "offsetkeeper.source.offset": "0",
 		"offsetkeeper.attempts": "3",
 	}
 	for k, v := range want {
-		if got, ok := header(d, k); !ok || got != v {
+		if got, ok := harness.Header(d, k); !ok || got != v {
 			t.Errorf("DLQ header %s = %q (present %v), want %q", k, got, ok, v)
 		}
 	}
-	if got, _ := header(d, "offsetkeeper.error"); !strings.Contains(got, "kaboom") {
+	if got, _ := harness.Header(d, "offsetkeeper.error"); !strings.Contains(got, "kaboom") {
 		t.Errorf("DLQ header offsetkeeper.error = %q, want it to contain the handler error", got)
 	}
 
@@ -733,7 +512,7 @@ func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("%d dead-lettered log lines, want 1; log:\n%s", len(lines), logs)
 	}
-	for k, want := range map[string]any{"level": "WARN", "topic": e.topic, "partition": 0.0, "offset": 0.0, "dlq_topic": dlqTopic, "attempts": 3.0} {
+	for k, want := range map[string]any{"level": "WARN", "topic": e.Topic, "partition": 0.0, "offset": 0.0, "dlq_topic": dlqTopic, "attempts": 3.0} {
 		if lines[0][k] != want {
 			t.Errorf("dead-lettered log %s = %v, want %v", k, lines[0][k], want)
 		}
@@ -743,33 +522,33 @@ func TestDLQWriteConfirmedBeforeSourceCommit(t *testing.T) {
 // Replaying a dead-lettered record sends it to the handler again; ReplayAll
 // remembers what it replayed.
 func TestReplayedRecordIsProcessedOnceMore(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
-	testenv.Produce(t, e.brokers,
-		&kgo.Record{Topic: e.topic, Key: []byte("a"), Value: []byte("poison-1"), Headers: []kgo.RecordHeader{{Key: "h1", Value: []byte("v1")}}},
-		&kgo.Record{Topic: e.topic, Key: []byte("b"), Value: []byte("poison-2"), Headers: []kgo.RecordHeader{{Key: "h1", Value: []byte("v1")}}})
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
+	testenv.Produce(t, e.Brokers,
+		&kgo.Record{Topic: e.Topic, Key: []byte("a"), Value: []byte("poison-1"), Headers: []kgo.RecordHeader{{Key: "h1", Value: []byte("v1")}}},
+		&kgo.Record{Topic: e.Topic, Key: []byte("b"), Value: []byte("poison-2"), Headers: []kgo.RecordHeader{{Key: "h1", Value: []byte("v1")}}})
 
 	var fixed, badHeaders atomic.Bool
-	var ok calls
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+	var ok harness.Calls
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
 		if !fixed.Load() {
-			return errBoom
+			return harness.ErrBoom
 		}
-		ok.add(rec, "")
-		if _, has := header(rec, dlq.HeaderAttempts); has {
+		ok.Add(rec, "")
+		if _, has := harness.Header(rec, dlq.HeaderAttempts); has {
 			badHeaders.Store(true) // offsetkeeper.* must be stripped on replay
 		}
-		if v, _ := header(rec, "h1"); v != "v1" {
+		if v, _ := harness.Header(rec, "h1"); v != "v1" {
 			badHeaders.Store(true)
 		}
 		return nil
 	})
 	cfg.DLQTopic = dlqTopic
-	r := start(t, ctx, cfg)
-	r.until(t, "both records dead-lettered", func() bool { return e.total(t, dlqTopic) == 2 && e.drained(t) })
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "both records dead-lettered", func() bool { return e.Total(t, dlqTopic) == 2 && e.Drained(t) })
 	fixed.Store(true)
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...))
+	cl, err := kgo.NewClient(kgo.SeedBrokers(e.Brokers...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,7 +557,7 @@ func TestReplayedRecordIsProcessedOnceMore(t *testing.T) {
 	if err := dlq.ReplayOne(ctx, cl, dlqTopic, 0, 0); err != nil {
 		t.Fatalf("ReplayOne: %v", err)
 	}
-	r.until(t, "poison-1 handled after ReplayOne", func() bool { return ok.value("poison-1") >= 1 })
+	r.Until(t, "poison-1 handled after ReplayOne", func() bool { return ok.Value("poison-1") >= 1 })
 
 	// ReplayOne is independent of ReplayAll's tracking (internal/dlq, docs/CONTRACT.md
 	// guarantee 7): poison-1 was replayed by ReplayOne and is replayed again here.
@@ -786,17 +565,17 @@ func TestReplayedRecordIsProcessedOnceMore(t *testing.T) {
 	if err != nil || n != 2 {
 		t.Fatalf("first ReplayAll = %d, %v; want exactly 2 (both records, ReplayOne is not tracked)", n, err)
 	}
-	r.until(t, "poison-2 handled after ReplayAll", func() bool { return ok.value("poison-2") >= 1 && e.drained(t) })
+	r.Until(t, "poison-2 handled after ReplayAll", func() bool { return ok.Value("poison-2") >= 1 && e.Drained(t) })
 	if badHeaders.Load() {
 		t.Error("a replayed record kept offsetkeeper.* headers or lost its original headers")
 	}
 
-	end := testenv.End(t, e.brokers, e.topic)
+	end := testenv.End(t, e.Brokers, e.Topic)
 	n, err = dlq.ReplayAll(ctx, cl, dlqTopic)
 	if err != nil || n != 0 {
 		t.Fatalf("second ReplayAll = %d, %v; want 0", n, err)
 	}
-	if after := testenv.End(t, e.brokers, e.topic); after[0] != end[0] {
+	if after := testenv.End(t, e.Brokers, e.Topic); after[0] != end[0] {
 		t.Errorf("second ReplayAll produced records: end %v -> %v", end, after)
 	}
 }
@@ -804,28 +583,28 @@ func TestReplayedRecordIsProcessedOnceMore(t *testing.T) {
 // Per partition: offsets strictly increase and handlers never overlap.
 func TestPartitionOrder(t *testing.T) {
 	const parts, per = 4, 20
-	e, ctx := newEnv(t, parts), testCtx(t)
-	e.produce(t, "r", per)
-	var c calls
+	e, ctx := harness.NewEnv(t, parts), harness.Ctx(t)
+	e.Produce(t, "r", per)
+	var c harness.Calls
 	var inflight [parts]atomic.Int32
 	var overlap atomic.Bool
-	r := start(t, ctx, e.cfg(func(_ context.Context, rec *kgo.Record) error {
+	r := harness.Start(t, ctx, e.Cfg(func(_ context.Context, rec *kgo.Record) error {
 		if inflight[rec.Partition].Add(1) > 1 {
 			overlap.Store(true)
 		}
-		c.add(rec, "")
+		c.Add(rec, "")
 		for range 20 {
 			runtime.Gosched() // widen the window in which an overlap would show
 		}
 		inflight[rec.Partition].Add(-1)
 		return nil
 	}))
-	r.until(t, "topic drained", func() bool { return e.drained(t) })
+	r.Until(t, "topic drained", func() bool { return e.Drained(t) })
 	if overlap.Load() {
 		t.Error("two handlers ran at once in one partition")
 	}
 	for p := range int32(parts) {
-		os := c.offsets(p)
+		os := c.Offsets(p)
 		if len(os) != per {
 			t.Errorf("partition %d: %d calls, want %d", p, len(os), per)
 		}
@@ -839,85 +618,85 @@ func TestPartitionOrder(t *testing.T) {
 
 // Permanent skips the retries: one attempt, then the DLQ with attempts=1.
 func TestPermanentSkipsRetries(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
-	e.produce(t, "r", 3)
-	var c calls
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
+	e.Produce(t, "r", 3)
+	var c harness.Calls
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		if rec.Offset == 1 {
-			return offsetkeeper.Permanent(errBoom)
+			return offsetkeeper.Permanent(harness.ErrBoom)
 		}
 		return nil
 	})
 	cfg.DLQTopic = dlqTopic
-	r := start(t, ctx, cfg)
-	r.until(t, "record dead-lettered and source drained", func() bool { return e.total(t, dlqTopic) == 1 && e.drained(t) })
-	if n := c.offset(1); n != 1 {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "record dead-lettered and source drained", func() bool { return e.Total(t, dlqTopic) == 1 && e.Drained(t) })
+	if n := c.Offset(1); n != 1 {
 		t.Errorf("permanent failure handled %d times, want 1", n)
 	}
-	recs := testenv.Records(t, e.brokers, dlqTopic)
-	if got, _ := header(recs[0], dlq.HeaderAttempts); got != "1" {
+	recs := testenv.Records(t, e.Brokers, dlqTopic)
+	if got, _ := harness.Header(recs[0], dlq.HeaderAttempts); got != "1" {
 		t.Errorf("DLQ attempts = %q, want 1", got)
 	}
-	if !r.running() {
-		t.Errorf("Run exited: %v", r.err)
+	if !r.Running() {
+		t.Errorf("Run exited: %v", r.Err)
 	}
 }
 
 // A handler panic is retried like an error, dead-lettered with its text, and
 // does not take the process or the partition down.
 func TestHandlerPanicIsAnError(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
-	e.produce(t, "r", 3)
-	var c calls
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
+	e.Produce(t, "r", 3)
+	var c harness.Calls
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		if rec.Offset == 1 {
 			panic("kaboom")
 		}
 		return nil
 	})
 	cfg.DLQTopic = dlqTopic
-	r := start(t, ctx, cfg)
-	r.until(t, "panicking record dead-lettered and source drained", func() bool { return e.total(t, dlqTopic) == 1 && e.drained(t) })
-	if n := c.offset(1); n != 3 {
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "panicking record dead-lettered and source drained", func() bool { return e.Total(t, dlqTopic) == 1 && e.Drained(t) })
+	if n := c.Offset(1); n != 3 {
 		t.Errorf("panicking record handled %d times, want 3", n)
 	}
-	if c.offset(2) == 0 {
+	if c.Offset(2) == 0 {
 		t.Error("record after the panic was never handled")
 	}
-	if got, _ := header(testenv.Records(t, e.brokers, dlqTopic)[0], dlq.HeaderError); !strings.Contains(got, "kaboom") {
+	if got, _ := harness.Header(testenv.Records(t, e.Brokers, dlqTopic)[0], dlq.HeaderError); !strings.Contains(got, "kaboom") {
 		t.Errorf("DLQ error header = %q, want the panic value", got)
 	}
-	if !r.running() {
-		t.Errorf("Run exited: %v", r.err)
+	if !r.Running() {
+		t.Errorf("Run exited: %v", r.Err)
 	}
 }
 
 // Side effects do not settle a record: only the return value does.
 func TestHandlerReturnOwnsSettlement(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "r", 3)
-	var c calls
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "r", 3)
+	var c harness.Calls
 	var sideEffects atomic.Int32
-	err := start(t, ctx, e.cfg(func(_ context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	err := harness.Start(t, ctx, e.Cfg(func(_ context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		sideEffects.Add(1) // work done before failing
-		return errBoom
-	})).wait(t, waitFor)
-	if !errors.Is(err, errBoom) {
+		return harness.ErrBoom
+	})).Wait(t, harness.WaitFor)
+	if !errors.Is(err, harness.ErrBoom) {
 		t.Fatalf("Run returned %v, want an error wrapping the handler error", err)
 	}
-	mustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 0", e.topic))
+	harness.MustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 0", e.Topic))
 	if n := sideEffects.Load(); n != 3 {
 		t.Errorf("side effect ran %d times, want 3", n)
 	}
-	if n := c.past(0); n != 0 {
+	if n := c.Past(0); n != 0 {
 		t.Errorf("%d records after the failed first record were handled", n)
 	}
-	if got := e.committed(t)[0]; got != 0 {
+	if got := e.Committed(t)[0]; got != 0 {
 		t.Errorf("committed %d though the handler returned an error", got)
 	}
 }
@@ -925,21 +704,21 @@ func TestHandlerReturnOwnsSettlement(t *testing.T) {
 // The Kafka key is routing data, not an identity: same-key records are all handled.
 func TestKafkaKeyIsNotMessageID(t *testing.T) {
 	const n = 10
-	e, ctx := newEnv(t, 1), testCtx(t)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
 	var rs []*kgo.Record
 	for i := range n {
 		v := fmt.Sprintf("v%d", i)
 		if i >= n-2 {
 			v = "same" // two records identical in key and value
 		}
-		rs = append(rs, &kgo.Record{Topic: e.topic, Key: []byte("dup"), Value: []byte(v)})
+		rs = append(rs, &kgo.Record{Topic: e.Topic, Key: []byte("dup"), Value: []byte(v)})
 	}
-	testenv.Produce(t, e.brokers, rs...)
-	var c calls
-	r := start(t, ctx, e.cfg(func(_ context.Context, rec *kgo.Record) error { c.add(rec, ""); return nil }))
-	r.until(t, "topic drained", func() bool { return e.drained(t) })
+	testenv.Produce(t, e.Brokers, rs...)
+	var c harness.Calls
+	r := harness.Start(t, ctx, e.Cfg(func(_ context.Context, rec *kgo.Record) error { c.Add(rec, ""); return nil }))
+	r.Until(t, "topic drained", func() bool { return e.Drained(t) })
 	for o := range int64(n) {
-		if c.offset(o) == 0 {
+		if c.Offset(o) == 0 {
 			t.Errorf("offset %d was never handled", o)
 		}
 	}
@@ -947,21 +726,21 @@ func TestKafkaKeyIsNotMessageID(t *testing.T) {
 
 // Cancel during a long backoff: no further attempt, and Run returns promptly with nil.
 func TestRetryBackoffStopsOnShutdown(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "r", 1)
-	var c calls
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error { c.add(rec, ""); return errBoom })
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "r", 1)
+	var c harness.Calls
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error { c.Add(rec, ""); return harness.ErrBoom })
 	cfg.MaxAttempts, cfg.Backoff = 5, 10*time.Second
-	r := start(t, ctx, cfg)
-	r.until(t, "first attempt", func() bool { return c.total() >= 1 })
-	r.cancel()
-	if err := r.wait(t, 5*time.Second); err != nil { // < Backoff: Run must not sit out the delay
+	r := harness.Start(t, ctx, cfg)
+	r.Until(t, "first attempt", func() bool { return c.Total() >= 1 })
+	r.Cancel()
+	if err := r.Wait(t, 5*time.Second); err != nil { // < Backoff: Run must not sit out the delay
 		t.Fatalf("Run returned %v after cancel, want nil", err)
 	}
-	if n := c.total(); n != 1 {
+	if n := c.Total(); n != 1 {
 		t.Errorf("handler ran %d times, want 1 (no retry after cancel)", n)
 	}
-	if got := e.committed(t)[0]; got != 0 {
+	if got := e.Committed(t)[0]; got != 0 {
 		t.Errorf("committed %d for an unsettled record", got)
 	}
 }
@@ -971,10 +750,10 @@ func TestCommitErrorStopsRun(t *testing.T) {
 	if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
 		t.Skip("injects an OffsetCommit failure with kfake's ControlKey; a real broker cannot be told to fail")
 	}
-	cluster, ctx := testenv.Kfake(t), testCtx(t)
+	cluster, ctx := testenv.Kfake(t), harness.Ctx(t)
 	brokers := cluster.ListenAddrs()
-	e := env{brokers, testenv.Topic(t, brokers, 1), testenv.Group(t), 1}
-	e.produce(t, "r", 3)
+	e := harness.Env{Brokers: brokers, Topic: testenv.Topic(t, brokers, 1), Group: testenv.Group(t), Partitions: 1}
+	e.Produce(t, "r", 3)
 
 	// Non-retriable, so kgo hands it to Run instead of retrying it away.
 	cluster.ControlKey(int16(kmsg.OffsetCommit), func(req kmsg.Request) (kmsg.Response, error, bool) {
@@ -994,12 +773,12 @@ func TestCommitErrorStopsRun(t *testing.T) {
 		return resp, nil, true
 	})
 
-	var c calls
-	err := start(t, ctx, e.cfg(func(_ context.Context, rec *kgo.Record) error { c.add(rec, ""); return nil })).wait(t, waitFor)
+	var c harness.Calls
+	err := harness.Start(t, ctx, e.Cfg(func(_ context.Context, rec *kgo.Record) error { c.Add(rec, ""); return nil })).Wait(t, harness.WaitFor)
 	if !errors.Is(err, kerr.OffsetMetadataTooLarge) {
 		t.Fatalf("Run returned %v, want the commit error", err)
 	}
-	if got := e.committed(t); len(got) != 0 {
+	if got := e.Committed(t); len(got) != 0 {
 		t.Errorf("committed %v though every commit failed", got)
 	}
 }
@@ -1007,27 +786,27 @@ func TestCommitErrorStopsRun(t *testing.T) {
 // A handler that ignores ctx and returns nil after the cancel: that record is
 // settled and committed, but no later record is handled.
 func TestNoRecordHandledAfterCancel(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "r", 5)
-	var c calls
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "r", 5)
+	var c harness.Calls
 	var reached atomic.Bool
-	r := start(t, ctx, e.cfg(func(ctx context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	r := harness.Start(t, ctx, e.Cfg(func(ctx context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		if rec.Offset == 1 {
 			reached.Store(true)
 			<-ctx.Done()
 		}
 		return nil // nil even after the cancel: the loop itself must stop
 	}))
-	r.until(t, "handler to block at offset 1", reached.Load)
-	r.cancel()
-	if err := r.wait(t, 15*time.Second); err != nil {
+	r.Until(t, "handler to block at offset 1", reached.Load)
+	r.Cancel()
+	if err := r.Wait(t, 15*time.Second); err != nil {
 		t.Fatalf("Run returned %v after cancel, want nil", err)
 	}
-	if n := c.past(1); n != 0 {
+	if n := c.Past(1); n != 0 {
 		t.Errorf("%d records after the cancelled one were handled", n)
 	}
-	if got := e.committed(t)[0]; got != 2 {
+	if got := e.Committed(t)[0]; got != 2 {
 		t.Errorf("committed %d, want 2 (offsets 0-1 returned nil)", got)
 	}
 }
@@ -1035,25 +814,25 @@ func TestNoRecordHandledAfterCancel(t *testing.T) {
 // runtime.Goexit (t.FailNow, a library) is not a panic and recover() cannot stop
 // it; the partition goroutine must count as failed, not as "no error".
 func TestHandlerGoexitStopsRun(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "r", 4)
-	var c calls
-	err := start(t, ctx, e.cfg(func(_ context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "r", 4)
+	var c harness.Calls
+	err := harness.Start(t, ctx, e.Cfg(func(_ context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		if rec.Offset == 1 {
 			runtime.Goexit()
 		}
 		return nil
-	})).wait(t, waitFor)
+	})).Wait(t, harness.WaitFor)
 	if err == nil {
 		t.Fatal("Run returned nil though a handler never returned")
 	}
-	mustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 1", e.topic), "Goexit")
-	if n := c.past(1); n != 0 {
+	harness.MustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 1", e.Topic), "Goexit")
+	if n := c.Past(1); n != 0 {
 		t.Errorf("%d records past the dead handler were handled", n)
 	}
 	// Offset 0 settled before the Goexit and is kept; offset 1 never returned.
-	if got := e.committed(t)[0]; got != 1 {
+	if got := e.Committed(t)[0]; got != 1 {
 		t.Errorf("committed %d, want exactly 1", got)
 	}
 }
@@ -1063,24 +842,24 @@ func TestHandlerGoexitStopsRun(t *testing.T) {
 // partitions arrive in one poll is up to kgo, so the exact two-partition choreography
 // is TestBatchErrorCommitsOtherPartitions; this only asserts what holds either way.
 func TestErrorExitCommitsOtherPartitions(t *testing.T) {
-	e, ctx := newEnv(t, 2), testCtx(t)
-	e.produce(t, "r", 5)
-	var c calls
-	r := start(t, ctx, e.cfg(func(ctx context.Context, rec *kgo.Record) error {
-		c.add(rec, "")
+	e, ctx := harness.NewEnv(t, 2), harness.Ctx(t)
+	e.Produce(t, "r", 5)
+	var c harness.Calls
+	r := harness.Start(t, ctx, e.Cfg(func(ctx context.Context, rec *kgo.Record) error {
+		c.Add(rec, "")
 		switch {
 		case rec.Partition == 0 && rec.Offset == 2:
-			return errBoom
+			return harness.ErrBoom
 		case rec.Partition == 1 && rec.Offset >= 2:
 			<-ctx.Done() // unsettled until the failure cancels the batch
 			return ctx.Err()
 		}
 		return nil
 	}))
-	if err := r.wait(t, waitFor); !errors.Is(err, errBoom) {
+	if err := r.Wait(t, harness.WaitFor); !errors.Is(err, harness.ErrBoom) {
 		t.Fatalf("Run returned %v, want the handler error", err)
 	}
-	got := e.committed(t)
+	got := e.Committed(t)
 	if got[0] != 2 {
 		t.Errorf("failing partition committed %d, want 2", got[0])
 	}
@@ -1096,11 +875,11 @@ func TestDLQProduceTimeoutStopsRun(t *testing.T) {
 	if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
 		t.Skip("injects NOT_ENOUGH_REPLICAS with kfake's ControlKey; a real broker cannot be told to fail")
 	}
-	cluster, ctx := testenv.Kfake(t), testCtx(t)
+	cluster, ctx := testenv.Kfake(t), harness.Ctx(t)
 	brokers := cluster.ListenAddrs()
-	e := env{brokers, testenv.Topic(t, brokers, 1), testenv.Group(t), 1}
+	e := harness.Env{Brokers: brokers, Topic: testenv.Topic(t, brokers, 1), Group: testenv.Group(t), Partitions: 1}
 	dlqTopic := testenv.Topic(t, brokers, 1)
-	e.produce(t, "r", 3)
+	e.Produce(t, "r", 3)
 	// Registered before start, so it runs after start's cleanup has seen Run exit.
 	t.Cleanup(offsetkeeper.SetDLQTimeout(500 * time.Millisecond))
 
@@ -1123,22 +902,22 @@ func TestDLQProduceTimeoutStopsRun(t *testing.T) {
 		return resp, nil, true
 	})
 
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
 		if rec.Offset == 1 {
-			return errBoom
+			return harness.ErrBoom
 		}
 		return nil
 	})
 	cfg.DLQTopic = dlqTopic
-	err := start(t, ctx, cfg).wait(t, 15*time.Second)
+	err := harness.Start(t, ctx, cfg).Wait(t, 15*time.Second)
 	if err == nil {
 		t.Fatal("Run returned nil though the DLQ produce never succeeded")
 	}
-	mustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 1", e.topic), dlqTopic)
+	harness.MustContain(t, "Run error", err.Error(), fmt.Sprintf("%s/0 offset 1", e.Topic), dlqTopic)
 	if attempts.Load() == 0 {
 		t.Error("the injected Produce error was never hit: the test proves nothing")
 	}
-	if got := e.committed(t)[0]; got != 1 {
+	if got := e.Committed(t)[0]; got != 1 {
 		t.Errorf("committed %d, want exactly 1 (offset 0 settled, 1's DLQ write failed)", got)
 	}
 }
@@ -1146,23 +925,23 @@ func TestDLQProduceTimeoutStopsRun(t *testing.T) {
 // A handler that re-publishes the record it was given (a "retry later" pattern)
 // makes kgo rewrite that record's Offset; the commit must not follow it.
 func TestHandlerCannotMoveCommit(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	e.produce(t, "r", 3)
-	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(e.brokers...))
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	e.Produce(t, "r", 3)
+	p, err := offsetkeeper.NewPublisher(kgo.SeedBrokers(e.Brokers...))
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
 	}
 	t.Cleanup(p.Close)
-	cfg := e.cfg(func(ctx context.Context, rec *kgo.Record) error {
+	cfg := e.Cfg(func(ctx context.Context, rec *kgo.Record) error {
 		if rec.Offset == 1 {
-			return errBoom
+			return harness.ErrBoom
 		}
 		return p.Publish(ctx, rec) // moves rec.Offset past the end of the topic
 	})
-	if err := start(t, ctx, cfg).wait(t, waitFor); err == nil {
+	if err := harness.Start(t, ctx, cfg).Wait(t, harness.WaitFor); err == nil {
 		t.Fatal("Run returned nil though offset 1 failed without a DLQ")
 	}
-	if got := e.committed(t)[0]; got != 1 {
+	if got := e.Committed(t)[0]; got != 1 {
 		t.Errorf("committed %d, want exactly 1 (only offset 0 settled)", got)
 	}
 }
@@ -1170,28 +949,28 @@ func TestHandlerCannotMoveCommit(t *testing.T) {
 // A handler that rewrites the record's routing fields before failing must not
 // change what the DLQ says about the source.
 func TestDLQNamesOriginalSource(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
-	e.produce(t, "r", 3)
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
+	e.Produce(t, "r", 3)
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
 		if rec.Offset == 1 {
 			rec.Topic, rec.Partition, rec.Offset = "elsewhere", 7, 99
-			return errBoom
+			return harness.ErrBoom
 		}
 		return nil
 	})
 	cfg.DLQTopic = dlqTopic
-	start(t, ctx, cfg).until(t, "source drained", func() bool { return e.drained(t) })
+	harness.Start(t, ctx, cfg).Until(t, "source drained", func() bool { return e.Drained(t) })
 
-	recs := testenv.Records(t, e.brokers, dlqTopic)
+	recs := testenv.Records(t, e.Brokers, dlqTopic)
 	if len(recs) != 1 {
 		t.Fatalf("DLQ has %d records, want 1", len(recs))
 	}
 	want := map[string]string{
-		dlq.HeaderSourceTopic: e.topic, dlq.HeaderSourcePartition: "0", dlq.HeaderSourceOffset: "1",
+		dlq.HeaderSourceTopic: e.Topic, dlq.HeaderSourcePartition: "0", dlq.HeaderSourceOffset: "1",
 	}
 	for k, v := range want {
-		if got, _ := header(recs[0], k); got != v {
+		if got, _ := harness.Header(recs[0], k); got != v {
 			t.Errorf("DLQ header %s = %q, want %q", k, got, v)
 		}
 	}
@@ -1257,9 +1036,9 @@ func TestPublishUsesAcksAllAndIdempotence(t *testing.T) {
 	if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
 		t.Skip("reads produce requests with kfake's ControlKey; a real broker cannot be observed")
 	}
-	cluster, ctx := testenv.Kfake(t), testCtx(t)
+	cluster, ctx := testenv.Kfake(t), harness.Ctx(t)
 	brokers := cluster.ListenAddrs()
-	e := env{brokers, testenv.Topic(t, brokers, 1), testenv.Group(t), 1}
+	e := harness.Env{Brokers: brokers, Topic: testenv.Topic(t, brokers, 1), Group: testenv.Group(t), Partitions: 1}
 	dlqTopic := testenv.Topic(t, brokers, 1)
 	seen := observeProduce(t, cluster)
 
@@ -1268,21 +1047,21 @@ func TestPublishUsesAcksAllAndIdempotence(t *testing.T) {
 		t.Fatalf("NewPublisher: %v", err)
 	}
 	t.Cleanup(p.Close)
-	if err := p.Publish(ctx, &kgo.Record{Topic: e.topic, Value: []byte("x")}); err != nil {
+	if err := p.Publish(ctx, &kgo.Record{Topic: e.Topic, Value: []byte("x")}); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	checkAcksAll(t, "Publisher.Publish", seen())
 
-	e.produce(t, "r", 3)
+	e.Produce(t, "r", 3)
 	seen() // the test's own seeding produce is not under test
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
 		if rec.Offset == 1 {
-			return errBoom
+			return harness.ErrBoom
 		}
 		return nil
 	})
 	cfg.DLQTopic = dlqTopic
-	start(t, ctx, cfg).until(t, "dead-lettered and drained", func() bool { return e.drained(t) })
+	harness.Start(t, ctx, cfg).Until(t, "dead-lettered and drained", func() bool { return e.Drained(t) })
 	checkAcksAll(t, "DLQ produce", seen()) // Run produces only the dead letter
 }
 
@@ -1290,28 +1069,28 @@ func TestPublishUsesAcksAllAndIdempotence(t *testing.T) {
 // record unwritable: the header is capped, so the record is dead-lettered and
 // the source commit moves on.
 func TestDLQErrorHeaderCapped(t *testing.T) {
-	e, ctx := newEnv(t, 1), testCtx(t)
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
-	e.produce(t, "r", 2)
+	e, ctx := harness.NewEnv(t, 1), harness.Ctx(t)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
+	e.Produce(t, "r", 2)
 	huge := errors.New(strings.Repeat("x", 2<<20))
-	cfg := e.cfg(func(_ context.Context, rec *kgo.Record) error {
+	cfg := e.Cfg(func(_ context.Context, rec *kgo.Record) error {
 		if rec.Offset == 1 {
 			return huge
 		}
 		return nil
 	})
 	cfg.DLQTopic = dlqTopic
-	start(t, ctx, cfg).until(t, "source drained", func() bool { return e.drained(t) })
+	harness.Start(t, ctx, cfg).Until(t, "source drained", func() bool { return e.Drained(t) })
 
-	recs := testenv.Records(t, e.brokers, dlqTopic)
+	recs := testenv.Records(t, e.Brokers, dlqTopic)
 	if len(recs) != 1 {
 		t.Fatalf("DLQ has %d records, want 1", len(recs))
 	}
-	got, _ := header(recs[0], "offsetkeeper.error")
+	got, _ := harness.Header(recs[0], "offsetkeeper.error")
 	if len(got) > 4096 || !strings.HasSuffix(got, "…(truncated)") {
 		t.Errorf("DLQ error header is %d bytes, want <= 4096 ending in the truncation marker", len(got))
 	}
-	if c := e.committed(t)[0]; c != 2 {
+	if c := e.Committed(t)[0]; c != 2 {
 		t.Errorf("committed %d, want 2", c)
 	}
 }
