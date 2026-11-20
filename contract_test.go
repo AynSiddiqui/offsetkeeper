@@ -780,7 +780,7 @@ func TestReplayedRecordIsProcessedOnceMore(t *testing.T) {
 	}
 	r.until(t, "poison-1 handled after ReplayOne", func() bool { return ok.value("poison-1") >= 1 })
 
-	// ReplayOne is independent of ReplayAll's tracking (internal/dlq, CONTRACT.md
+	// ReplayOne is independent of ReplayAll's tracking (internal/dlq, docs/CONTRACT.md
 	// guarantee 7): poison-1 was replayed by ReplayOne and is replayed again here.
 	n, err := dlq.ReplayAll(ctx, cl, dlqTopic)
 	if err != nil || n != 2 {

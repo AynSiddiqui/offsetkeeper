@@ -21,7 +21,7 @@ import (
 )
 
 // Case 1: 64 partitions with concurrent handlers.
-// Asserts CONTRACT.md Guarantee 2 (order within a partition; partitions run concurrently)
+// Asserts docs/CONTRACT.md Guarantee 2 (order within a partition; partitions run concurrently)
 // and Guarantee 4 (commits contiguous settled prefix per partition).
 // Concurrency is proven even on GOMAXPROCS=1 by gating partition 0 until partition 1 enters.
 func Test64PartitionsConcurrent(t *testing.T) {
@@ -128,8 +128,8 @@ func Test64PartitionsConcurrent(t *testing.T) {
 }
 
 // Case 2: Goroutine leak verification across all termination paths.
-// Asserts STYLE.md Concurrency ("every go statement has one owner that waits for it")
-// and CONTRACT.md Guarantee 6 (clean shutdown on exit).
+// Asserts docs/STYLE.md Concurrency ("every go statement has one owner that waits for it")
+// and docs/CONTRACT.md Guarantee 6 (clean shutdown on exit).
 // Uses stack inspection for offsetkeeper worker frames and validates return errors.
 func TestGoroutineLeak(t *testing.T) {
 	cases := []struct {
@@ -244,8 +244,8 @@ func TestGoroutineLeak(t *testing.T) {
 }
 
 // Case 3: Cancel during poll, during handler, during backoff, during DLQ produce, during commit.
-// Asserts CONTRACT.md Guarantee 6 (Shutdown), Guarantee 4 (Commit on error/exit), and
-// STYLE.md Reliability rule 3 (every wait bounded, commits survive cancel using WithoutCancel).
+// Asserts docs/CONTRACT.md Guarantee 6 (Shutdown), Guarantee 4 (Commit on error/exit), and
+// docs/STYLE.md Reliability rule 3 (every wait bounded, commits survive cancel using WithoutCancel).
 func TestCancelDuringLifecycle(t *testing.T) {
 	t.Run("poll", func(t *testing.T) {
 		if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
@@ -531,7 +531,7 @@ func TestHandlerBlocks3sAfterCancel(t *testing.T) {
 }
 
 // Case 5: Panics and Goexit in several partitions at once.
-// Asserts CONTRACT.md Guarantee 3 (recovered panics count as errors, Goexit stops Run)
+// Asserts docs/CONTRACT.md Guarantee 3 (recovered panics count as errors, Goexit stops Run)
 // and Guarantee 4 (commits prefix of other settled partitions).
 func TestConcurrentPanicsAndGoexit(t *testing.T) {
 	e, ctx := newEnv(t, 4), testCtx(t)
@@ -606,7 +606,7 @@ func TestConcurrentPanicsAndGoexit(t *testing.T) {
 }
 
 // Case 6: Three members joining and leaving repeatedly (flapping) while records flow.
-// Asserts CONTRACT.md Guarantee 1 (at-least-once delivery; no lost records),
+// Asserts docs/CONTRACT.md Guarantee 1 (at-least-once delivery; no lost records),
 // Guarantee 4 (final commits reach end), and Guarantee 5 (rebalance coordination).
 // Produces distinct waves across membership changes, gates during rebalance,
 // verifies BlockRebalanceOnPoll prevents concurrent partition execution, and
@@ -781,7 +781,7 @@ func TestRebalanceFlappingMembers(t *testing.T) {
 }
 
 // Case 7: Partitions added to topic while Run is running (kadm CreatePartitions).
-// Asserts CONTRACT.md Guarantee 2 (per-partition consumption).
+// Asserts docs/CONTRACT.md Guarantee 2 (per-partition consumption).
 // Verifies offsets (2,0) and (3,0) specifically and checks committed next offset is 1.
 func TestPartitionsAddedWhileRunning(t *testing.T) {
 	e, ctx := newEnv(t, 2), testCtx(t)
@@ -911,7 +911,7 @@ func TestTopicDeletedWhileRunning(t *testing.T) {
 }
 
 // Case 9: Fatal error in one partition while another partition's handler is mid-retry backoff.
-// Asserts CONTRACT.md Guarantee 3 (fatal error aborts Run), Guarantee 6 (context cancellation
+// Asserts docs/CONTRACT.md Guarantee 3 (fatal error aborts Run), Guarantee 6 (context cancellation
 // aborts backoff without waiting full delay; interrupted partition is unsettled), and
 // Guarantee 4 (unsettled partitions are not committed).
 func TestFatalErrorDuringRetryBackoff(t *testing.T) {

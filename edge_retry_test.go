@@ -22,7 +22,7 @@ import (
 )
 
 // Case 1: MaxAttempts=1 (no retry, straight to DLQ).
-// CONTRACT.md Guarantee 3 & Config.MaxAttempts doc:
+// docs/CONTRACT.md Guarantee 3 & Config.MaxAttempts doc:
 // MaxAttempts=1 means no retries; failed record goes straight to DLQ on attempt 1.
 func TestEdgeMaxAttemptsOneDLQ(t *testing.T) {
 	cluster, ctx := testenv.Kfake(t), testCtx(t)
@@ -69,7 +69,7 @@ func TestEdgeMaxAttemptsOneDLQ(t *testing.T) {
 }
 
 // Case 2: exact backoff schedule observed through handler call timestamps.
-// CONTRACT.md Guarantee 3: doubling backoff from Backoff.
+// docs/CONTRACT.md Guarantee 3: doubling backoff from Backoff.
 // Review fix: Uses testing/synctest on retry with no broker to assert cumulative virtual times.
 func TestEdgeBackoffSchedule(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestEdgeBackoffSchedule(t *testing.T) {
 }
 
 // Case 3a: permanent error on the last attempt (with DLQ).
-// CONTRACT.md Guarantee 3: After the last attempt, with DLQTopic the DLQ record is produced.
+// docs/CONTRACT.md Guarantee 3: After the last attempt, with DLQTopic the DLQ record is produced.
 func TestEdgePermanentErrorOnLastAttemptDLQ(t *testing.T) {
 	cluster, ctx := testenv.Kfake(t), testCtx(t)
 	brokers := cluster.ListenAddrs()
@@ -161,7 +161,7 @@ func TestEdgePermanentErrorOnLastAttemptDLQ(t *testing.T) {
 }
 
 // Case 3b: permanent error on the last attempt (without DLQ).
-// CONTRACT.md Guarantee 3: Without DLQTopic, Run returns an error naming topic, partition, offset.
+// docs/CONTRACT.md Guarantee 3: Without DLQTopic, Run returns an error naming topic, partition, offset.
 // Review fix: Asserts formatted source identity, that record 1 was untouched, and checkpoint 0.
 func TestEdgePermanentErrorOnLastAttemptNoDLQ(t *testing.T) {
 	cluster, ctx := testenv.Kfake(t), testCtx(t)
@@ -208,7 +208,7 @@ func TestEdgePermanentErrorOnLastAttemptNoDLQ(t *testing.T) {
 }
 
 // Case 4: handler that fails N-1 times then succeeds (no DLQ, committed).
-// CONTRACT.md Guarantee 3: handler returning nil settles the record; no DLQ record produced.
+// docs/CONTRACT.md Guarantee 3: handler returning nil settles the record; no DLQ record produced.
 func TestEdgeHandlerFailsNMinusOneThenSucceeds(t *testing.T) {
 	cluster, ctx := testenv.Kfake(t), testCtx(t)
 	brokers := cluster.ListenAddrs()
@@ -253,7 +253,7 @@ func TestEdgeHandlerFailsNMinusOneThenSucceeds(t *testing.T) {
 }
 
 // Case 5: DLQ produce fails transiently then succeeds within dlqTimeout.
-// CONTRACT.md Guarantee 3: DLQ record produce ack settles the source.
+// docs/CONTRACT.md Guarantee 3: DLQ record produce ack settles the source.
 // kfake ControlKey fails first 2 Produce requests to DLQ topic with retriable error;
 // 3rd succeeds: record settled once, exactly 1 DLQ record.
 func TestEdgeDLQProduceTransientFailure(t *testing.T) {
@@ -336,7 +336,7 @@ func TestEdgeDLQProduceTransientFailure(t *testing.T) {
 }
 
 // Case 6: DLQ produce fails with a non-retriable error.
-// CONTRACT.md Guarantee 3: if DLQ produce fails, Run returns error, commits nothing at or past it.
+// docs/CONTRACT.md Guarantee 3: if DLQ produce fails, Run returns error, commits nothing at or past it.
 // Review fix: Uses errors.Is(err, kerr.TopicAuthorizationFailed) and verifies fast exit.
 func TestEdgeDLQProduceNonRetriable(t *testing.T) {
 	if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
@@ -415,7 +415,7 @@ func TestEdgeDLQProduceNonRetriable(t *testing.T) {
 }
 
 // Case 7: OffsetCommit returns a retriable error once, then succeeds.
-// CONTRACT.md Guarantee 4: Commit.
+// docs/CONTRACT.md Guarantee 4: Commit.
 // Review fix: After observing recovered commit 3, produce a second wave of records
 // and require its handler identity and checkpoint (commit 5) to prove continued consumption.
 func TestEdgeOffsetCommitRetriableOnce(t *testing.T) {
@@ -492,7 +492,7 @@ func TestEdgeOffsetCommitRetriableOnce(t *testing.T) {
 }
 
 // Case 8: commit timeout path (ControlKey delays OffsetCommit > 10s).
-// CONTRACT.md Guarantee 4 & offsetkeeper.go commitTimeout const (10s):
+// docs/CONTRACT.md Guarantee 4 & offsetkeeper.go commitTimeout const (10s):
 // Review fix: Uses SleepControl with request-seen and cleanup release gates;
 // keeps response withheld until Run reports the commit deadline.
 func TestEdgeCommitTimeout(t *testing.T) {
@@ -553,7 +553,7 @@ func TestEdgeCommitTimeout(t *testing.T) {
 }
 
 // Case 9a: Publisher: Publish with zero records.
-// CONTRACT.md Guarantee 8 & doc comment for Publish:
+// docs/CONTRACT.md Guarantee 8 & doc comment for Publish:
 // Publish with no records returns nil without error or panic.
 // Review fix: Retains one empty call.
 func TestEdgePublisherZeroRecords(t *testing.T) {
@@ -570,7 +570,7 @@ func TestEdgePublisherZeroRecords(t *testing.T) {
 }
 
 // Case 9b: Publisher: with nil record in the slice (must not panic: or document).
-// CONTRACT.md and doc comment are silent on nil records in Publish slice.
+// docs/CONTRACT.md and doc comment are silent on nil records in Publish slice.
 // Safe behaviour requires: no panic, return a clear error.
 // Known library bug (being fixed separately): Publisher.Publish panics on nil record in slice.
 func TestEdgePublisherNilRecord(t *testing.T) {
@@ -583,14 +583,14 @@ func TestEdgePublisherNilRecord(t *testing.T) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("known bug: Publisher.Publish panicked with nil record: %v (CONTRACT.md/doc silent; safe behaviour requires error, no panic)", r)
+			t.Fatalf("known bug: Publisher.Publish panicked with nil record: %v (docs/CONTRACT.md/doc silent; safe behaviour requires error, no panic)", r)
 		}
 	}()
 	_ = p.Publish(t.Context(), (*kgo.Record)(nil))
 }
 
 // Case 9c: Publisher: to a missing topic with UnknownTopicRetries default.
-// CONTRACT.md Guarantee 8 & doc comment for Publish:
+// docs/CONTRACT.md Guarantee 8 & doc comment for Publish:
 // Review fix: Requires errors.Is(err, kerr.UnknownTopicOrPartition), labeled as default-client characterization.
 func TestEdgePublisherMissingTopicDefaultRetries(t *testing.T) {
 	brokers := testenv.Brokers(t)
@@ -618,7 +618,7 @@ func TestEdgePublisherMissingTopicDefaultRetries(t *testing.T) {
 }
 
 // Case 9d: Publisher: ctx cancelled before Publish.
-// CONTRACT.md Guarantee 8 & doc comment:
+// docs/CONTRACT.md Guarantee 8 & doc comment:
 // Review fix: Uses testenv.Brokers(t) to honor backend selection.
 func TestEdgePublisherContextCancelled(t *testing.T) {
 	brokers := testenv.Brokers(t)
@@ -659,7 +659,7 @@ func TestEdgePublisherCloseTwice(t *testing.T) {
 }
 
 // Case 9f: Publisher: Publish after Close (error, no panic).
-// CONTRACT.md Guarantee 8 & doc comment:
+// docs/CONTRACT.md Guarantee 8 & doc comment:
 // Review fix: Requires errors.Is(err, kgo.ErrClientClosed).
 func TestEdgePublisherPublishAfterClose(t *testing.T) {
 	brokers := testenv.Brokers(t)
@@ -684,7 +684,7 @@ func TestEdgePublisherPublishAfterClose(t *testing.T) {
 }
 
 // Missing Case (a): Publish a mixed batch with one accepted and one broker-rejected record.
-// CONTRACT.md Guarantee 8: Publish awaits all results, wraps the failure, and the accepted record is readable.
+// docs/CONTRACT.md Guarantee 8: Publish awaits all results, wraps the failure, and the accepted record is readable.
 func TestEdgePublisherMixedBatchAcceptedAndRejected(t *testing.T) {
 	if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
 		t.Skip("injects targeted partition fault with kfake; a real broker cannot be told to fail a partition")
@@ -730,7 +730,7 @@ func TestEdgePublisherMixedBatchAcceptedAndRejected(t *testing.T) {
 }
 
 // Missing Case (b): Cancel while a settled-prefix commit is pending and inject non-retriable OffsetCommit failure.
-// CONTRACT.md Guarantees 4 & 6: The commit error wins over clean shutdown, and actual group offsets reflect failure.
+// docs/CONTRACT.md Guarantees 4 & 6: The commit error wins over clean shutdown, and actual group offsets reflect failure.
 func TestEdgeCommitErrorWinsOverShutdown(t *testing.T) {
 	if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
 		t.Skip("injects OffsetCommit error with kfake's ControlKey; a real broker cannot be told to fail")

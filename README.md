@@ -9,8 +9,8 @@ queue that cannot commit past an unsettled record.
 go get github.com/AynSiddiqui/offsetkeeper@v0.1.0
 ```
 
-- [CONTRACT.md](CONTRACT.md): what is guaranteed, and the test behind each guarantee
-- [CONTRIBUTING.md](CONTRIBUTING.md): how the code is written
+- [docs/CONTRACT.md](docs/CONTRACT.md): what is guaranteed, and the test behind each guarantee
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md): how the code is written
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ func main() {
 
 ## What it guarantees
 
-See [CONTRACT.md](CONTRACT.md) for the full contract and test suite.
+See [docs/CONTRACT.md](docs/CONTRACT.md) for the full contract and test suite.
 
 - **At-least-once delivery.** Handlers may see a record more than once and must be idempotent.
 - **Per-partition order.** Records are handled sequentially in offset order within a partition.
@@ -118,7 +118,7 @@ Running `replay` without `-partition` and `-offset` replays every record not yet
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for workflow and commits, [STYLE.md](STYLE.md) for code rules, and [SECURITY.md](SECURITY.md) to report a vulnerability.
+See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for workflow and commits, [docs/STYLE.md](docs/STYLE.md) for code rules, and [docs/SECURITY.md](docs/SECURITY.md) to report a vulnerability.
 
 ## How this is built
 

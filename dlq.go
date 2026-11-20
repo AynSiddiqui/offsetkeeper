@@ -28,7 +28,7 @@ func (w *worker) deadLetter(ctx context.Context, src *kgo.Record, attempts int, 
 	// On timeout kgo fails the record as soon as that is safe, and settle sees the
 	// parent ctx still live, so the failure reaches Run as an error. If the request
 	// was already sent and the broker never answers, kgo cannot fail it safely and
-	// this waits (CONTRACT.md "Not promised").
+	// this waits (docs/CONTRACT.md "Not promised").
 	pctx, cancel := context.WithTimeout(ctx, dlqTimeout)
 	defer cancel()
 	if err := w.cl.ProduceSync(pctx, rec).FirstErr(); err != nil {

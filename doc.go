@@ -4,7 +4,7 @@
 // being handled, skipped, or failed. A failed record settles only when its
 // dead-letter write is acked.
 //
-// The guarantees are in [CONTRACT.md]; each one names the test that proves it.
+// The guarantees are in [docs/CONTRACT.md]; each one names the test that proves it.
 //
 // # How a batch is committed
 //
@@ -30,5 +30,5 @@
 //		},
 //	})
 //
-// [CONTRACT.md]: https://github.com/AynSiddiqui/offsetkeeper/blob/main/CONTRACT.md
+// [docs/CONTRACT.md]: https://github.com/AynSiddiqui/offsetkeeper/blob/main/docs/CONTRACT.md
 package offsetkeeper

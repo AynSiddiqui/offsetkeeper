@@ -31,7 +31,7 @@ func testClient(t *testing.T, brokers []string, opts ...kgo.Opt) *kgo.Client {
 }
 
 // Case 1: nil key, nil value, empty value, tombstones through normal handling, DLQ and replay.
-// CONTRACT.md: Guarantee 1 (at-least-once), Guarantee 3 (settlement), Guarantee 7 (DLQ record has same key/value).
+// docs/CONTRACT.md: Guarantee 1 (at-least-once), Guarantee 3 (settlement), Guarantee 7 (DLQ record has same key/value).
 // Review verdict: fix (route both empty shapes through DLQ and replay; compare nilness and bytes at each stage).
 func TestEdgeRecordShapes_NilEmptyTombstone(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -137,7 +137,7 @@ func TestEdgeRecordShapes_NilEmptyTombstone(t *testing.T) {
 }
 
 // Case 2: 1 MiB value through handler, commit, DLQ and replay.
-// CONTRACT.md: Guarantee 1, 3, 7, 8. Note: ClientOpts must configure ProducerBatchMaxBytes for >1MB.
+// docs/CONTRACT.md: Guarantee 1, 3, 7, 8. Note: ClientOpts must configure ProducerBatchMaxBytes for >1MB.
 // Review verdict: keep (retain sized clients and compressible fixture; claim logical payload size).
 func TestEdgeRecordShapes_1MiBValue(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -205,7 +205,7 @@ func TestEdgeRecordShapes_1MiBValue(t *testing.T) {
 }
 
 // Case 3: 500 headers on a record through handler, DLQ, and replay.
-// CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source, plus offsetkeeper.*").
+// docs/CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source, plus offsetkeeper.*").
 // Review verdict: keep (keep full sequence comparison).
 func TestEdgeRecordShapes_500Headers(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -281,7 +281,7 @@ func TestEdgeRecordShapes_500Headers(t *testing.T) {
 }
 
 // Case 4: User headers starting with reserved prefix `offsetkeeper.`
-// CONTRACT.md: Guarantee 7 ("all headers prefixed with offsetkeeper. are reserved and stripped before replaying").
+// docs/CONTRACT.md: Guarantee 7 ("all headers prefixed with offsetkeeper. are reserved and stripped before replaying").
 // Review verdict: keep (keep collision and custom-prefix cases).
 func TestEdgeRecordShapes_ReservedHeaders(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -355,7 +355,7 @@ func TestEdgeRecordShapes_ReservedHeaders(t *testing.T) {
 }
 
 // Case 5: Duplicate header keys.
-// CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source...").
+// docs/CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source...").
 // Review verdict: fix (compare full ordered pairs at handler and replay, and check r.wait).
 func TestEdgeRecordShapes_DuplicateHeaderKeys(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -429,7 +429,7 @@ func TestEdgeRecordShapes_DuplicateHeaderKeys(t *testing.T) {
 }
 
 // Case 6: Non-UTF-8 bytes in key, value, and header key/value through DLQ and replay.
-// CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source...").
+// docs/CONTRACT.md: Guarantee 7 ("DLQ record. Same key, value and headers as the source...").
 // Review verdict: fix (require r.wait to return nil).
 func TestEdgeRecordShapes_NonUTF8Bytes(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -511,7 +511,7 @@ func TestEdgeRecordShapes_NonUTF8Bytes(t *testing.T) {
 
 // Case 7a: Transactional source topic with READ_COMMITTED.
 // Control records and aborted transactions create offset gaps.
-// CONTRACT.md: Guarantee 3 (settlement), Guarantee 4 (commit never past unsettled).
+// docs/CONTRACT.md: Guarantee 3 (settlement), Guarantee 4 (commit never past unsettled).
 // Review verdict: fix (derive offsets dynamically from produce results/ack to support all brokers including Redpanda).
 func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -746,7 +746,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_ReadCommitted(t *testing.T) {
 }
 
 // Case 7b: Transactional source topic with default isolation (READ_UNCOMMITTED).
-// CONTRACT.md: Guarantee 3 (settlement), Guarantee 4 (commit never past unsettled).
+// docs/CONTRACT.md: Guarantee 3 (settlement), Guarantee 4 (commit never past unsettled).
 // Review verdict: fix (derive offsets dynamically from produce results/ack to support all brokers including Redpanda).
 func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -972,7 +972,7 @@ func TestEdgeOffsetGaps_TransactionalSourceTopic_DefaultIsolation(t *testing.T) 
 }
 
 // Case 8: Offset gaps from log truncation / retention (kadm.DeleteRecords; start offset > 0).
-// CONTRACT.md: Guarantee 4 ("highest contiguous settled offset per partition (offset plus one). Never past an unsettled record").
+// docs/CONTRACT.md: Guarantee 4 ("highest contiguous settled offset per partition (offset plus one). Never past an unsettled record").
 // Review verdict: fix (check response.Error(), verify low watermark 3, assert [3,4] on failure and [3,4,5] on success, make failure interior).
 func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -1119,7 +1119,7 @@ func TestEdgeOffsetGaps_LogTruncationDeletedRecords(t *testing.T) {
 }
 
 // Case 9: Records with LeaderEpoch set; handler mutation does not affect broker commit.
-// CONTRACT.md: Guarantee 4 ("Handlers cannot change the committed offset by modifying their record").
+// docs/CONTRACT.md: Guarantee 4 ("Handlers cannot change the committed offset by modifying their record").
 // Review verdict: fix (compare kadm.FetchOffsets partition LeaderEpoch with captured epoch as well as At).
 func TestEdgeRecords_LeaderEpoch(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
@@ -1169,7 +1169,7 @@ func TestEdgeRecords_LeaderEpoch(t *testing.T) {
 }
 
 // Case 10: A batch where the last record of a partition is the failing one.
-// CONTRACT.md: Guarantee 3 (settlement), Guarantee 4 (commit prefix), Guarantee 7 (DLQ).
+// docs/CONTRACT.md: Guarantee 3 (settlement), Guarantee 4 (commit prefix), Guarantee 7 (DLQ).
 // Review verdict: keep (identify DLQ source offset 4 for dead letter).
 func TestEdgeRecords_BatchLastRecordFails(t *testing.T) {
 	// Subcase A: Without DLQ
@@ -1248,7 +1248,7 @@ func TestEdgeRecords_BatchLastRecordFails(t *testing.T) {
 }
 
 // Case 12: 0-record topics (empty topic).
-// CONTRACT.md: Guarantee 6 (Shutdown). Docs are silent on empty topics; safe behavior: no hang, no panic, clean return on cancel.
+// docs/CONTRACT.md: Guarantee 6 (Shutdown). Docs are silent on empty topics; safe behavior: no hang, no panic, clean return on cancel.
 // Review verdict: fix (wait on an assignment or first Fetch for this topic before cancel).
 func TestEdgeRecords_ZeroRecordTopic(t *testing.T) {
 	e, ctx := newEnv(t, 3), testCtx(t) // 3 empty partitions
@@ -1301,7 +1301,7 @@ func TestEdgeRecords_ZeroRecordTopic(t *testing.T) {
 
 // Missing Case (a): Two configured source topics with the same partition number and overlapping offsets.
 // Fail one topic, verify separate handler identities, settled prefixes and group checkpoints.
-// CONTRACT.md: Guarantee 2 (order per partition), Guarantee 4 (commit prefix per partition).
+// docs/CONTRACT.md: Guarantee 2 (order per partition), Guarantee 4 (commit prefix per partition).
 func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 	b := testenv.Brokers(t)
 	topicA := testenv.Topic(t, b, 1)
@@ -1440,7 +1440,7 @@ func TestEdgeRecords_TwoSourceTopicsSamePartitionFailOne(t *testing.T) {
 
 // Missing Case (b): An interior transactional failure followed by another visible record in the same partition and batch.
 // Assert that the handler never sees the successor before restart, then verify both redeliver in order.
-// CONTRACT.md: Guarantee 2 (order per partition), Guarantee 3 (settlement), Guarantee 4 (commit).
+// docs/CONTRACT.md: Guarantee 2 (order per partition), Guarantee 3 (settlement), Guarantee 4 (commit).
 func TestEdgeRecords_InteriorTransactionalFailure(t *testing.T) {
 	e, ctx := newEnv(t, 1), testCtx(t)
 	txCl := testClient(t, e.brokers,

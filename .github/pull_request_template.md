@@ -9,7 +9,7 @@
 - [ ] Real brokers run (kafka, redpanda), or "real-broker untested" stated here
 - [ ] `CHANGELOG.md` updated under *Unreleased* (user-visible changes)
 - [ ] `apidiff`/`gorelease` output pasted if exported API changed
-- [ ] Doc comments and `CONTRACT.md` updated
+- [ ] Doc comments and `docs/CONTRACT.md` updated
 - [ ] No new dependency beyond stdlib and franz-go
 
 ## Testing
