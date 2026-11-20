@@ -14,7 +14,7 @@ body:
     id: proposal
     attributes:
       label: Proposed API and behavior
-      description: Exported identifiers, defaults, and the CONTRACT.md guarantee it touches.
+      description: Exported identifiers, defaults, and the docs/CONTRACT.md guarantee it touches.
     validations:
       required: true
   - type: textarea

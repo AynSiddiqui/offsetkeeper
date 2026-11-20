@@ -16,7 +16,7 @@ import (
 
 // TestEdgeCLIBrokersWhitespaceAndCommas tests that -brokers containing only
 // commas and spaces is rejected with code 2 and a message about at least one broker address.
-// Doc ref: cmd/offsetkeeper/main.go validateCommon; CONTRACT.md is silent on CLI flag parsing.
+// Doc ref: cmd/offsetkeeper/main.go validateCommon; docs/CONTRACT.md is silent on CLI flag parsing.
 func TestEdgeCLIBrokersWhitespaceAndCommas(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -55,7 +55,7 @@ func TestEdgeCLIBrokersWhitespaceAndCommas(t *testing.T) {
 
 // TestEdgeCLITLSAgainstPlaintextKfake tests -tls against an explicit plaintext kfake broker.
 // When -tls is specified against a plaintext broker, the ping probe fails fast with an actionable -tls hint.
-// Doc ref: cmd/offsetkeeper/main.go newClient; CONTRACT.md is silent on TLS against plaintext.
+// Doc ref: cmd/offsetkeeper/main.go newClient; docs/CONTRACT.md is silent on TLS against plaintext.
 func TestEdgeCLITLSAgainstPlaintextKfake(t *testing.T) {
 	origPing := pingTimeout
 	pingTimeout = 1 * time.Second
@@ -99,7 +99,7 @@ func TestEdgeCLITLSAgainstPlaintextKfake(t *testing.T) {
 // TestEdgeCLIListLongErrorEscaping tests that listing DLQ records with long error text
 // containing control chars, newlines, tabs, and quotes escapes each row onto a single line,
 // and that unquoting the field recovers the full original error text byte-for-byte.
-// Doc ref: cmd/offsetkeeper/main.go escape and runDLQList; CONTRACT.md §7.
+// Doc ref: cmd/offsetkeeper/main.go escape and runDLQList; docs/CONTRACT.md §7.
 func TestEdgeCLIListLongErrorEscaping(t *testing.T) {
 	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, "dlq-esc"))
 	if err != nil {
@@ -178,7 +178,7 @@ func TestEdgeCLIListLongErrorEscaping(t *testing.T) {
 // 1. Output never contains raw \t, \n, \r.
 // 2. Output never contains raw control characters (bytes < 0x20 or 0x7f).
 // 3. strconv.Unquote MUST succeed without error and recover s byte-for-byte.
-// Doc ref: cmd/offsetkeeper/main.go escape; CONTRACT.md is silent on CLI escaping.
+// Doc ref: cmd/offsetkeeper/main.go escape; docs/CONTRACT.md is silent on CLI escaping.
 func FuzzEscape(f *testing.F) {
 	seeds := []string{
 		"",

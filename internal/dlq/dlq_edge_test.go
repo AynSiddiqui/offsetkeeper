@@ -20,7 +20,7 @@ import (
 //  2. ReplayAll covers all 4 partitions, reproducing all 12 unique key/value pairs
 //     without loss or duplicates, and commits each partition's offset.
 //
-// Doc ref: CONTRACT.md §7; internal/dlq/dlq.go List and ReplayAll doc comments.
+// Doc ref: docs/CONTRACT.md §7; internal/dlq/dlq.go List and ReplayAll doc comments.
 func TestEdgeDLQFourPartitions(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	dlqTopic := testenv.Topic(t, brokers, 4)
@@ -136,7 +136,7 @@ func TestEdgeDLQFourPartitions(t *testing.T) {
 
 // TestEdgeDLQEmptyTopic tests ReplayAll on an empty DLQ topic.
 // It returns (0, nil) immediately without error or hang.
-// Doc ref: CONTRACT.md §7; internal/dlq/dlq.go ReplayAll doc comment.
+// Doc ref: docs/CONTRACT.md §7; internal/dlq/dlq.go ReplayAll doc comment.
 func TestEdgeDLQEmptyTopic(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	emptyTopic := testenv.Topic(t, brokers, 4)
@@ -157,7 +157,7 @@ func TestEdgeDLQEmptyTopic(t *testing.T) {
 // TestEdgeDLQNonexistentTopic tests List, ReplayOne, and ReplayAll on a nonexistent topic.
 // Each subtest gets a fresh context, verifies that it returned a missing-topic error,
 // and ensures the context was still live at return (not passing on deadline expiration).
-// Doc ref: internal/dlq/dlq.go bounds; CONTRACT.md is silent on nonexistent DLQ topic.
+// Doc ref: internal/dlq/dlq.go bounds; docs/CONTRACT.md is silent on nonexistent DLQ topic.
 func TestEdgeDLQNonexistentTopic(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	cl := newClient(t, brokers)
@@ -216,7 +216,7 @@ func TestEdgeDLQNonexistentTopic(t *testing.T) {
 // When DeleteRecords deletes records 0..2 on partition 0 (leaving [3, 5)), ReplayOne(0, 1)
 // must return a range error naming partition 0, offset 1, and available range [3, 5),
 // with no record produced to the destination topic.
-// Doc ref: CONTRACT.md §7 ("expired records cannot be replayed"); internal/dlq/dlq.go ReplayOne doc.
+// Doc ref: docs/CONTRACT.md §7 ("expired records cannot be replayed"); internal/dlq/dlq.go ReplayOne doc.
 func TestEdgeReplayOneInvalidOffsets(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	topic := testenv.Topic(t, brokers, 1)
@@ -277,7 +277,7 @@ func TestEdgeReplayOneInvalidOffsets(t *testing.T) {
 // TestEdgeDLQRecordsWithoutHeadersAndMalformed tests DLQ records without offsetkeeper headers
 // and with malformed header values.
 // ReplayAll must fail at record 1 with an error naming HeaderSourceTopic and the offending record (topic/0 offset 1).
-// Doc ref: internal/dlq/dlq.go Entry and ReplayAll doc comments; CONTRACT.md §7.
+// Doc ref: internal/dlq/dlq.go Entry and ReplayAll doc comments; docs/CONTRACT.md §7.
 func TestEdgeDLQRecordsWithoutHeadersAndMalformed(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	dlqTopic := testenv.Topic(t, brokers, 1)
@@ -396,7 +396,7 @@ func TestEdgeDLQRecordsWithoutHeadersAndMalformed(t *testing.T) {
 
 // TestEdgeReplaySourceTopicDeleted tests ReplayOne when destination topic was deleted.
 // It must fail with missing-destination cause with a fresh context.
-// Doc ref: CONTRACT.md §7; internal/dlq/dlq.go ReplayOne doc comment.
+// Doc ref: docs/CONTRACT.md §7; internal/dlq/dlq.go ReplayOne doc comment.
 func TestEdgeReplaySourceTopicDeleted(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	dlqTopic := testenv.Topic(t, brokers, 1)
@@ -466,7 +466,7 @@ func (h *cancelOnProduceHook) OnProduceRecordUnbuffered(r *kgo.Record, err error
 // TestEdgeReplayAllContextCancelResumed tests ReplayAll interrupted mid-way by context cancellation.
 // Requires hook count 2, errors.Is(err1, context.Canceled), n1=2, and first-run durable keys/checkpoint
 // before resuming. When resumed: no records lost, <= 1 duplicate.
-// Doc ref: CONTRACT.md §7 ("at most the one record that was acked but not yet committed").
+// Doc ref: docs/CONTRACT.md §7 ("at most the one record that was acked but not yet committed").
 func TestEdgeReplayAllContextCancelResumed(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	dlqTopic := testenv.Topic(t, brokers, 1)
@@ -578,7 +578,7 @@ func TestEdgeReplayAllContextCancelResumed(t *testing.T) {
 // 1. List and ReplayAll return within a bound (nil if broker exposes progress, or a ctx error if broker never does).
 // 2. Every visible record is listed and replayed exactly once.
 // 3. The checkpoint never points before an unreplayed visible record nor past the log end.
-// Doc ref: CONTRACT.md §7 ("If a DLQ topic contains an invisible terminal marker... list or replay waits for a visible record or cancellation (Ctrl-C)").
+// Doc ref: docs/CONTRACT.md §7 ("If a DLQ topic contains an invisible terminal marker... list or replay waits for a visible record or cancellation (Ctrl-C)").
 func TestEdgeDLQTerminalTransactionMarker(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	dlqTopic := testenv.Topic(t, brokers, 1)
@@ -683,7 +683,7 @@ func TestEdgeDLQTerminalTransactionMarker(t *testing.T) {
 // TestEdgeReplayRetentionPastCheckpoint tests replay after retention moves the low watermark
 // past an existing checkpoint (via DeleteRecords):
 // Only retained keys are reproduced, and the checkpoint advances to the end.
-// Doc ref: CONTRACT.md §7 ("retention may also have moved start past the commit, in which case the deleted records are gone and start wins").
+// Doc ref: docs/CONTRACT.md §7 ("retention may also have moved start past the commit, in which case the deleted records are gone and start wins").
 func TestEdgeReplayRetentionPastCheckpoint(t *testing.T) {
 	brokers := testenv.Brokers(t)
 	dlqTopic := testenv.Topic(t, brokers, 1)
@@ -762,7 +762,7 @@ func TestEdgeReplayRetentionPastCheckpoint(t *testing.T) {
 // FuzzHeadersDecodeRoundTrip fuzzes Headers and decode to verify round-trip integrity:
 // Headers then decode returns the same source fields for arbitrary inputs.
 // Exact retained prefix plus marker is verified for errors exceeding maxErrorBytes.
-// Doc ref: internal/dlq/dlq.go Headers and decode; CONTRACT.md §7.
+// Doc ref: internal/dlq/dlq.go Headers and decode; docs/CONTRACT.md §7.
 func FuzzHeadersDecodeRoundTrip(f *testing.F) {
 	seeds := []struct {
 		topic     string

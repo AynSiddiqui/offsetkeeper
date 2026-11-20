@@ -31,6 +31,6 @@ jobs:
             offsetkeeper
           requireScope: false
           # action-semantic-pull-request matches subjectPattern against the subject portion.
-          # Full header length (≤72 chars total) is defined in CONTRIBUTING.md.
+          # Full header length (≤72 chars total) is defined in docs/CONTRIBUTING.md.
           subjectPattern: ^[a-z0-9](.{0,70}[^.])?$
           subjectPatternError: The subject "{subject}" must start with a lowercase letter or digit, not end with a period, and be at most 72 characters.
