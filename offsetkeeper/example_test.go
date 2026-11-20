@@ -5,7 +5,7 @@ import (
 	"errors"
 	"log"
 
-	"github.com/AynSiddiqui/offsetkeeper"
+	"github.com/AynSiddiqui/offsetkeeper/offsetkeeper"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 

@@ -1,4 +1,4 @@
-package offsetkeeper_test
+package edge_test
 
 import (
 	"context"
@@ -15,20 +15,21 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"github.com/AynSiddiqui/offsetkeeper"
+	"github.com/AynSiddiqui/offsetkeeper/internal/harness"
 	"github.com/AynSiddiqui/offsetkeeper/internal/testenv"
+	"github.com/AynSiddiqui/offsetkeeper/offsetkeeper"
 )
 
 // Case 1: Empty strings inside Brokers and Topics.
 // Tests that fail only because of known library bugs (empty broker strings) are
 // left as findings and marked in the report.
 func TestEdge_EmptyStringBrokersAndTopics(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
 	// Subtest 1: Brokers with empty string element (alone and mixed)
 	t.Run("empty string in Brokers slice alone", func(t *testing.T) {
-		cfg := e.cfg(func(ctx context.Context, r *kgo.Record) error { return nil })
+		cfg := e.Cfg(func(ctx context.Context, r *kgo.Record) error { return nil })
 		cfg.Brokers = []string{""}
 		runCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 		defer cancel()
@@ -41,8 +42,8 @@ func TestEdge_EmptyStringBrokersAndTopics(t *testing.T) {
 	})
 
 	t.Run("empty string among valid brokers", func(t *testing.T) {
-		cfg := e.cfg(func(ctx context.Context, r *kgo.Record) error { return nil })
-		cfg.Brokers = []string{e.brokers[0], ""}
+		cfg := e.Cfg(func(ctx context.Context, r *kgo.Record) error { return nil })
+		cfg.Brokers = []string{e.Brokers[0], ""}
 		runCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 		defer cancel()
 		err := offsetkeeper.Run(runCtx, cfg)
@@ -53,7 +54,7 @@ func TestEdge_EmptyStringBrokersAndTopics(t *testing.T) {
 
 	// Subtest 2: Topics with empty string element (alone and mixed)
 	t.Run("empty string in Topics slice alone", func(t *testing.T) {
-		cfg := e.cfg(func(ctx context.Context, r *kgo.Record) error { return nil })
+		cfg := e.Cfg(func(ctx context.Context, r *kgo.Record) error { return nil })
 		cfg.Topics = []string{""}
 		err := offsetkeeper.Run(ctx, cfg)
 		if err == nil {
@@ -62,8 +63,8 @@ func TestEdge_EmptyStringBrokersAndTopics(t *testing.T) {
 	})
 
 	t.Run("empty string among valid topics", func(t *testing.T) {
-		cfg := e.cfg(func(ctx context.Context, r *kgo.Record) error { return nil })
-		cfg.Topics = []string{e.topic, ""}
+		cfg := e.Cfg(func(ctx context.Context, r *kgo.Record) error { return nil })
+		cfg.Topics = []string{e.Topic, ""}
 		runCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 		defer cancel()
 		err := offsetkeeper.Run(runCtx, cfg)
@@ -76,8 +77,8 @@ func TestEdge_EmptyStringBrokersAndTopics(t *testing.T) {
 // Case 2: Duplicate topics in Config.Topics.
 // Asserts the set of unique offsets {0, 1, 2} and final checkpoint 3.
 func TestEdge_DuplicateTopics(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
 	var mu sync.Mutex
 	seenOffsets := make(map[int64]int)
@@ -89,19 +90,19 @@ func TestEdge_DuplicateTopics(t *testing.T) {
 		return nil
 	}
 
-	cfg := e.cfg(h)
-	cfg.Topics = []string{e.topic, e.topic} // duplicate topic
+	cfg := e.Cfg(h)
+	cfg.Topics = []string{e.Topic, e.Topic} // duplicate topic
 
-	e.produce(t, "dup", 3) // offsets 0, 1, 2
+	e.Produce(t, "dup", 3) // offsets 0, 1, 2
 
-	run := start(t, ctx, cfg)
-	run.until(t, "all 3 distinct offsets handled", func() bool {
+	run := harness.Start(t, ctx, cfg)
+	run.Until(t, "all 3 distinct offsets handled", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(seenOffsets) == 3
 	})
-	run.cancel()
-	if err := run.wait(t, waitFor); err != nil {
+	run.Cancel()
+	if err := run.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
@@ -115,7 +116,7 @@ func TestEdge_DuplicateTopics(t *testing.T) {
 	mu.Unlock()
 
 	// Assert final checkpoint
-	comm := e.committed(t)
+	comm := e.Committed(t)
 	if comm[0] != 3 {
 		t.Errorf("final checkpoint = %d, want 3", comm[0])
 	}
@@ -124,8 +125,8 @@ func TestEdge_DuplicateTopics(t *testing.T) {
 // Case 3: Group with spaces and unicode.
 // Suffixes testenv.Group(t) with unicode text and asserts offset 2 on that exact group.
 func TestEdge_GroupSpacesAndUnicode(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
 	var handled atomic.Int32
 	h := func(ctx context.Context, r *kgo.Record) error {
@@ -133,17 +134,17 @@ func TestEdge_GroupSpacesAndUnicode(t *testing.T) {
 		return nil
 	}
 
-	cfg := e.cfg(h)
+	cfg := e.Cfg(h)
 	cfg.Group = testenv.Group(t) + " with spaces and 🚀 unicode"
 
-	e.produce(t, "uni", 2)
+	e.Produce(t, "uni", 2)
 
-	run := start(t, ctx, cfg)
-	run.until(t, "2 records handled", func() bool {
+	run := harness.Start(t, ctx, cfg)
+	run.Until(t, "2 records handled", func() bool {
 		return handled.Load() >= 2
 	})
-	run.cancel()
-	if err := run.wait(t, waitFor); err != nil {
+	run.Cancel()
+	if err := run.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
@@ -152,7 +153,7 @@ func TestEdge_GroupSpacesAndUnicode(t *testing.T) {
 	}
 
 	// Verify committed offset for the exact Unicode group
-	comm := testenv.Committed(t, e.brokers, cfg.Group, e.topic)
+	comm := testenv.Committed(t, e.Brokers, cfg.Group, e.Topic)
 	if comm[0] != 2 {
 		t.Errorf("committed offset for group %q = %d, want 2", cfg.Group, comm[0])
 	}
@@ -160,27 +161,27 @@ func TestEdge_GroupSpacesAndUnicode(t *testing.T) {
 
 // Case 4: MaxAttempts huge (1e9) with tiny Backoff (bounded by ctx cancellation).
 func TestEdge_HugeMaxAttemptsWithTinyBackoff(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
 	var attempts atomic.Int32
 	h := func(ctx context.Context, r *kgo.Record) error {
 		attempts.Add(1)
-		return errBoom
+		return harness.ErrBoom
 	}
 
-	cfg := e.cfg(h)
+	cfg := e.Cfg(h)
 	cfg.MaxAttempts = 1_000_000_000
 	cfg.Backoff = time.Nanosecond
 
-	e.produce(t, "huge", 1)
+	e.Produce(t, "huge", 1)
 
-	run := start(t, ctx, cfg)
-	run.until(t, "retried at least 5 times", func() bool {
+	run := harness.Start(t, ctx, cfg)
+	run.Until(t, "retried at least 5 times", func() bool {
 		return attempts.Load() >= 5
 	})
-	run.cancel()
-	err := run.wait(t, 5*time.Second)
+	run.Cancel()
+	err := run.Wait(t, 5*time.Second)
 	if err != nil {
 		t.Errorf("expected clean shutdown nil error on cancel, got: %v", err)
 	}
@@ -188,8 +189,8 @@ func TestEdge_HugeMaxAttemptsWithTinyBackoff(t *testing.T) {
 
 // Case 7a: ClientOpts with kgo.ConsumerGroup("other") -> offsetkeeper's group wins.
 func TestEdge_ClientOptsConsumerGroupOverride(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
 	otherGroup := testenv.Group(t)
 	var handled atomic.Int32
@@ -198,27 +199,27 @@ func TestEdge_ClientOptsConsumerGroupOverride(t *testing.T) {
 		return nil
 	}
 
-	cfg := e.cfg(h)
+	cfg := e.Cfg(h)
 	cfg.ClientOpts = []kgo.Opt{kgo.ConsumerGroup(otherGroup)}
 
-	e.produce(t, "cg-override", 1)
+	e.Produce(t, "cg-override", 1)
 
-	run := start(t, ctx, cfg)
-	run.until(t, "record handled", func() bool {
+	run := harness.Start(t, ctx, cfg)
+	run.Until(t, "record handled", func() bool {
 		return handled.Load() >= 1
 	})
-	run.cancel()
-	if err := run.wait(t, waitFor); err != nil {
+	run.Cancel()
+	if err := run.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
 	// Verify offsetkeeper's group committed the offset
-	comm := e.committed(t)
+	comm := e.Committed(t)
 	if comm[0] != 1 {
-		t.Errorf("expected cfg.Group %q to commit offset 1, got %d", e.group, comm[0])
+		t.Errorf("expected cfg.Group %q to commit offset 1, got %d", e.Group, comm[0])
 	}
 	// Verify otherGroup has NO commits
-	otherComm := testenv.Committed(t, e.brokers, otherGroup, e.topic)
+	otherComm := testenv.Committed(t, e.Brokers, otherGroup, e.Topic)
 	if at, ok := otherComm[0]; ok {
 		t.Errorf("expected otherGroup %q to have no commit, got %d", otherGroup, at)
 	}
@@ -228,14 +229,14 @@ func TestEdge_ClientOptsConsumerGroupOverride(t *testing.T) {
 // Uses a fresh main/extra pair, seeds a main sentinel and checks that extra topic
 // is not consumed.
 func TestEdge_ClientOptsConsumeTopicsOverride(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
-	mainTopic := testenv.Topic(t, e.brokers, 1)
-	extraTopic := testenv.Topic(t, e.brokers, 1)
+	mainTopic := testenv.Topic(t, e.Brokers, 1)
+	extraTopic := testenv.Topic(t, e.Brokers, 1)
 
 	// Produce distinct records to both topics
-	testenv.Produce(t, e.brokers,
+	testenv.Produce(t, e.Brokers,
 		&kgo.Record{Topic: extraTopic, Partition: 0, Key: []byte("extra-k"), Value: []byte("extra-v")},
 		&kgo.Record{Topic: mainTopic, Partition: 0, Key: []byte("main-k"), Value: []byte("main-v")},
 	)
@@ -254,7 +255,7 @@ func TestEdge_ClientOptsConsumeTopicsOverride(t *testing.T) {
 	}
 
 	cfg := offsetkeeper.Config{
-		Brokers:     e.brokers,
+		Brokers:     e.Brokers,
 		Group:       testenv.Group(t),
 		Topics:      []string{mainTopic},
 		Handler:     h,
@@ -262,12 +263,12 @@ func TestEdge_ClientOptsConsumeTopicsOverride(t *testing.T) {
 		MaxAttempts: 1,
 	}
 
-	run := start(t, ctx, cfg)
-	run.until(t, "main topic sentinel handled", func() bool {
+	run := harness.Start(t, ctx, cfg)
+	run.Until(t, "main topic sentinel handled", func() bool {
 		return mainSeen.Load()
 	})
-	run.cancel()
-	if err := run.wait(t, waitFor); err != nil {
+	run.Cancel()
+	if err := run.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
@@ -275,30 +276,30 @@ func TestEdge_ClientOptsConsumeTopicsOverride(t *testing.T) {
 		t.Errorf("records from ClientOpts extraTopic %q were consumed; offsetkeeper's configured Topics must win", extraTopic)
 	}
 
-	comm := testenv.Committed(t, e.brokers, cfg.Group, mainTopic)
+	comm := testenv.Committed(t, e.Brokers, cfg.Group, mainTopic)
 	if comm[0] != 1 {
 		t.Errorf("mainTopic committed offset = %d, want 1", comm[0])
 	}
-	extraComm := testenv.Committed(t, e.brokers, cfg.Group, extraTopic)
+	extraComm := testenv.Committed(t, e.Brokers, cfg.Group, extraTopic)
 	if at, ok := extraComm[0]; ok {
 		t.Errorf("extraTopic should not be committed, got %d", at)
 	}
 }
 
 // Case 7c: ClientOpts with auto-commit options -> offsetkeeper's DisableAutoCommit wins.
-// Uses valid AutoCommitInterval alone (>=100ms), requires errors.Is(err, errBoom),
+// Uses valid AutoCommitInterval alone (>=100ms), requires errors.Is(err, harness.ErrBoom),
 // and verifies no commit past unsettled record.
 func TestEdge_ClientOptsAutoCommitOverride(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
 	var handlerCalls atomic.Int32
 	h := func(ctx context.Context, r *kgo.Record) error {
 		handlerCalls.Add(1)
-		return errBoom // fail immediately without settling
+		return harness.ErrBoom // fail immediately without settling
 	}
 
-	cfg := e.cfg(h)
+	cfg := e.Cfg(h)
 	// Valid AutoCommitInterval alone (1s >= 100ms minimum)
 	cfg.ClientOpts = []kgo.Opt{
 		kgo.AutoCommitInterval(1 * time.Second),
@@ -306,22 +307,22 @@ func TestEdge_ClientOptsAutoCommitOverride(t *testing.T) {
 	cfg.MaxAttempts = 1
 	cfg.DLQTopic = "" // No DLQ: Run will return error on failure
 
-	e.produce(t, "autocommit", 3)
+	e.Produce(t, "autocommit", 3)
 
-	run := start(t, ctx, cfg)
-	err := run.wait(t, waitFor)
+	run := harness.Start(t, ctx, cfg)
+	err := run.Wait(t, harness.WaitFor)
 	if err == nil {
 		t.Fatal("expected Run to fail on handler error, got nil")
 	}
-	if !errors.Is(err, errBoom) {
-		t.Errorf("expected errBoom, got: %v", err)
+	if !errors.Is(err, harness.ErrBoom) {
+		t.Errorf("expected harness.ErrBoom, got: %v", err)
 	}
 	if handlerCalls.Load() == 0 {
 		t.Errorf("expected handler to be called, got 0 calls")
 	}
 
 	// Guarantee 4: Auto-commit is off. Never past an unsettled record.
-	comm := e.committed(t)
+	comm := e.Committed(t)
 	if at, ok := comm[0]; ok {
 		t.Errorf("expected no commit past unsettled record (absent), got offset %d", at)
 	}
@@ -330,14 +331,14 @@ func TestEdge_ClientOptsAutoCommitOverride(t *testing.T) {
 // Case 7d: ClientOpts with kgo.ConsumeRegex() using an anchored pattern matching
 // two fresh topics, producing distinct sentinels to both, and verifying identities.
 func TestEdge_ClientOptsConsumeRegex(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
-	base := testenv.Topic(t, e.brokers, 1)
+	base := testenv.Topic(t, e.Brokers, 1)
 	topicA := base + "-alpha"
 	topicB := base + "-beta"
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...))
+	cl, err := kgo.NewClient(kgo.SeedBrokers(e.Brokers...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +351,7 @@ func TestEdge_ClientOptsConsumeRegex(t *testing.T) {
 		t.Fatalf("create topics: %v", err)
 	}
 
-	testenv.Produce(t, e.brokers,
+	testenv.Produce(t, e.Brokers,
 		&kgo.Record{Topic: topicA, Partition: 0, Key: []byte("k-a"), Value: []byte("val-a")},
 		&kgo.Record{Topic: topicB, Partition: 0, Key: []byte("k-b"), Value: []byte("val-b")},
 	)
@@ -367,7 +368,7 @@ func TestEdge_ClientOptsConsumeRegex(t *testing.T) {
 	}
 
 	cfg := offsetkeeper.Config{
-		Brokers:     e.brokers,
+		Brokers:     e.Brokers,
 		Group:       testenv.Group(t),
 		Topics:      []string{"^" + regexp.QuoteMeta(base) + "-(alpha|beta)$"},
 		Handler:     h,
@@ -375,20 +376,20 @@ func TestEdge_ClientOptsConsumeRegex(t *testing.T) {
 		MaxAttempts: 1,
 	}
 
-	run := start(t, ctx, cfg)
-	run.until(t, "both regex matched topics handled", func() bool {
+	run := harness.Start(t, ctx, cfg)
+	run.Until(t, "both regex matched topics handled", func() bool {
 		return seenA.Load() && seenB.Load()
 	})
-	run.cancel()
-	if err := run.wait(t, waitFor); err != nil {
+	run.Cancel()
+	if err := run.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run failed with ConsumeRegex: %v", err)
 	}
 }
 
 // Case 8: ClientOpts with kgo.SeedBrokers pointing elsewhere.
 func TestEdge_ClientOptsSeedBrokersElsewhere(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
 	var handled atomic.Int32
 	h := func(ctx context.Context, r *kgo.Record) error {
@@ -396,17 +397,17 @@ func TestEdge_ClientOptsSeedBrokersElsewhere(t *testing.T) {
 		return nil
 	}
 
-	cfg := e.cfg(h)
+	cfg := e.Cfg(h)
 	cfg.ClientOpts = []kgo.Opt{kgo.SeedBrokers("127.0.0.1:1")}
 
-	e.produce(t, "seed-override", 2)
+	e.Produce(t, "seed-override", 2)
 
-	run := start(t, ctx, cfg)
-	run.until(t, "records handled despite bad seed in ClientOpts", func() bool {
+	run := harness.Start(t, ctx, cfg)
+	run.Until(t, "records handled despite bad seed in ClientOpts", func() bool {
 		return handled.Load() >= 2
 	})
-	run.cancel()
-	if err := run.wait(t, waitFor); err != nil {
+	run.Cancel()
+	if err := run.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
@@ -427,33 +428,33 @@ func TestEdge_PermanentErrorClassification(t *testing.T) {
 		{
 			name: "nested Permanent",
 			errFn: func() error {
-				return offsetkeeper.Permanent(offsetkeeper.Permanent(errBoom))
+				return offsetkeeper.Permanent(offsetkeeper.Permanent(harness.ErrBoom))
 			},
 			checkCause: func(t *testing.T, err error) {
-				if !errors.Is(err, errBoom) {
-					t.Errorf("errors.Is(err, errBoom) failed: %v", err)
+				if !errors.Is(err, harness.ErrBoom) {
+					t.Errorf("errors.Is(err, harness.ErrBoom) failed: %v", err)
 				}
 			},
 		},
 		{
 			name: "wrapped by fmt.Errorf %w",
 			errFn: func() error {
-				return fmt.Errorf("outer context: %w", offsetkeeper.Permanent(errBoom))
+				return fmt.Errorf("outer context: %w", offsetkeeper.Permanent(harness.ErrBoom))
 			},
 			checkCause: func(t *testing.T, err error) {
-				if !errors.Is(err, errBoom) {
-					t.Errorf("errors.Is(err, errBoom) failed: %v", err)
+				if !errors.Is(err, harness.ErrBoom) {
+					t.Errorf("errors.Is(err, harness.ErrBoom) failed: %v", err)
 				}
 			},
 		},
 		{
 			name: "errors.Join containing Permanent",
 			errFn: func() error {
-				return errors.Join(otherErr, offsetkeeper.Permanent(errBoom))
+				return errors.Join(otherErr, offsetkeeper.Permanent(harness.ErrBoom))
 			},
 			checkCause: func(t *testing.T, err error) {
-				if !errors.Is(err, errBoom) {
-					t.Errorf("errors.Is(err, errBoom) failed: %v", err)
+				if !errors.Is(err, harness.ErrBoom) {
+					t.Errorf("errors.Is(err, harness.ErrBoom) failed: %v", err)
 				}
 				if !errors.Is(err, otherErr) {
 					t.Errorf("errors.Is(err, otherErr) failed: %v", err)
@@ -464,8 +465,8 @@ func TestEdge_PermanentErrorClassification(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := testCtx(t)
-			e := newEnv(t, 1)
+			ctx := harness.Ctx(t)
+			e := harness.NewEnv(t, 1)
 
 			var attempts atomic.Int32
 			h := func(ctx context.Context, r *kgo.Record) error {
@@ -473,14 +474,14 @@ func TestEdge_PermanentErrorClassification(t *testing.T) {
 				return tc.errFn()
 			}
 
-			cfg := e.cfg(h)
+			cfg := e.Cfg(h)
 			cfg.MaxAttempts = 5
 			cfg.DLQTopic = ""
 
-			e.produce(t, "perm", 1)
+			e.Produce(t, "perm", 1)
 
-			run := start(t, ctx, cfg)
-			err := run.wait(t, waitFor)
+			run := harness.Start(t, ctx, cfg)
+			err := run.Wait(t, harness.WaitFor)
 			if err == nil {
 				t.Fatal("expected Run to fail, got nil")
 			}
@@ -496,10 +497,10 @@ func TestEdge_PermanentErrorClassification(t *testing.T) {
 func TestEdge_HandlerContextCanceledWhileRunLive(t *testing.T) {
 	for _, testErr := range []error{context.Canceled, context.DeadlineExceeded} {
 		t.Run(testErr.Error(), func(t *testing.T) {
-			ctx := testCtx(t)
-			e := newEnv(t, 1)
+			ctx := harness.Ctx(t)
+			e := harness.NewEnv(t, 1)
 
-			dlqTopic := testenv.Topic(t, e.brokers, 1)
+			dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 			var attempts atomic.Int32
 			h := func(ctx context.Context, r *kgo.Record) error {
@@ -507,25 +508,25 @@ func TestEdge_HandlerContextCanceledWhileRunLive(t *testing.T) {
 				return testErr
 			}
 
-			cfg := e.cfg(h)
+			cfg := e.Cfg(h)
 			cfg.MaxAttempts = 3
 			cfg.Backoff = time.Millisecond
 			cfg.DLQTopic = dlqTopic
 
-			e.produce(t, "ctx-err", 1)
+			e.Produce(t, "ctx-err", 1)
 
-			run := start(t, ctx, cfg)
-			run.until(t, "3 attempts executed and settled via DLQ", func() bool {
+			run := harness.Start(t, ctx, cfg)
+			run.Until(t, "3 attempts executed and settled via DLQ", func() bool {
 				return attempts.Load() >= 3
 			})
 
-			testenv.Eventually(t, waitFor, func() bool {
-				comm := e.committed(t)
+			testenv.Eventually(t, harness.WaitFor, func() bool {
+				comm := e.Committed(t)
 				return comm[0] == 1
 			}, "source topic offset to commit at 1 after DLQ publish")
 
-			run.cancel()
-			if err := run.wait(t, waitFor); err != nil {
+			run.Cancel()
+			if err := run.Wait(t, harness.WaitFor); err != nil {
 				t.Fatalf("Run failed: %v", err)
 			}
 
@@ -533,7 +534,7 @@ func TestEdge_HandlerContextCanceledWhileRunLive(t *testing.T) {
 				t.Errorf("attempts = %d, want 3", got)
 			}
 
-			if got := e.total(t, dlqTopic); got != 1 {
+			if got := e.Total(t, dlqTopic); got != 1 {
 				t.Errorf("DLQ has %d records, want 1", got)
 			}
 		})
@@ -551,8 +552,8 @@ func (*typedNilError) Error() string {
 // and DLQ-enabled (settled via DLQ, attempt header verified).
 func TestEdge_HandlerTypedNilError(t *testing.T) {
 	t.Run("no DLQ: exact attempts, errors.As match, no commit", func(t *testing.T) {
-		ctx := testCtx(t)
-		e := newEnv(t, 1)
+		ctx := harness.Ctx(t)
+		e := harness.NewEnv(t, 1)
 
 		var attempts atomic.Int32
 		h := func(ctx context.Context, r *kgo.Record) error {
@@ -561,15 +562,15 @@ func TestEdge_HandlerTypedNilError(t *testing.T) {
 			return nilErr
 		}
 
-		cfg := e.cfg(h)
+		cfg := e.Cfg(h)
 		cfg.MaxAttempts = 3
 		cfg.Backoff = time.Millisecond
 		cfg.DLQTopic = ""
 
-		e.produce(t, "typed-nil-nodlq", 1)
+		e.Produce(t, "typed-nil-nodlq", 1)
 
-		run := start(t, ctx, cfg)
-		err := run.wait(t, waitFor)
+		run := harness.Start(t, ctx, cfg)
+		err := run.Wait(t, harness.WaitFor)
 		if err == nil {
 			t.Fatal("expected Run to fail, got nil")
 		}
@@ -583,16 +584,16 @@ func TestEdge_HandlerTypedNilError(t *testing.T) {
 			t.Errorf("attempts = %d, want 3", got)
 		}
 
-		comm := e.committed(t)
+		comm := e.Committed(t)
 		if at, ok := comm[0]; ok {
 			t.Errorf("expected no commit advancement, got offset %d", at)
 		}
 	})
 
 	t.Run("with DLQ: settled via DLQ, headers verified", func(t *testing.T) {
-		ctx := testCtx(t)
-		e := newEnv(t, 1)
-		dlqTopic := testenv.Topic(t, e.brokers, 1)
+		ctx := harness.Ctx(t)
+		e := harness.NewEnv(t, 1)
+		dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 		var attempts atomic.Int32
 		h := func(ctx context.Context, r *kgo.Record) error {
@@ -601,32 +602,32 @@ func TestEdge_HandlerTypedNilError(t *testing.T) {
 			return nilErr
 		}
 
-		cfg := e.cfg(h)
+		cfg := e.Cfg(h)
 		cfg.MaxAttempts = 2
 		cfg.Backoff = time.Millisecond
 		cfg.DLQTopic = dlqTopic
 
-		e.produce(t, "typed-nil-dlq", 1)
+		e.Produce(t, "typed-nil-dlq", 1)
 
-		run := start(t, ctx, cfg)
-		run.until(t, "attempts reach 2", func() bool {
+		run := harness.Start(t, ctx, cfg)
+		run.Until(t, "attempts reach 2", func() bool {
 			return attempts.Load() >= 2
 		})
 
-		testenv.Eventually(t, waitFor, func() bool {
-			comm := e.committed(t)
+		testenv.Eventually(t, harness.WaitFor, func() bool {
+			comm := e.Committed(t)
 			return comm[0] == 1
 		}, "offset 1 committed after DLQ settlement")
 
-		run.cancel()
-		if err := run.wait(t, waitFor); err != nil {
+		run.Cancel()
+		if err := run.Wait(t, harness.WaitFor); err != nil {
 			t.Fatalf("Run failed: %v", err)
 		}
 
 		if got := attempts.Load(); got != 2 {
 			t.Errorf("attempts = %d, want 2", got)
 		}
-		if got := e.total(t, dlqTopic); got != 1 {
+		if got := e.Total(t, dlqTopic); got != 1 {
 			t.Fatalf("DLQ count = %d, want 1", got)
 		}
 	})
@@ -651,8 +652,8 @@ func tryGroupState(brokers []string, group string) (state string, members int, o
 // Uses two cleanup-owned runners, waits for a stable 2-member assignment before
 // producing, checks partition identities and both clean returns.
 func TestEdge_RunConcurrentSameGroupSameConfig(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 2) // 2 partitions
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 2) // 2 partitions
 
 	var (
 		mu         sync.Mutex
@@ -668,33 +669,33 @@ func TestEdge_RunConcurrentSameGroupSameConfig(t *testing.T) {
 		return nil
 	}
 
-	cfg := e.cfg(h)
+	cfg := e.Cfg(h)
 
-	run1 := start(t, ctx, cfg)
-	run2 := start(t, ctx, cfg)
+	run1 := harness.Start(t, ctx, cfg)
+	run2 := harness.Start(t, ctx, cfg)
 
 	// Wait for group to stabilize with 2 members
-	testenv.Eventually(t, waitFor, func() bool {
-		state, members, ok := tryGroupState(e.brokers, cfg.Group)
+	testenv.Eventually(t, harness.WaitFor, func() bool {
+		state, members, ok := tryGroupState(e.Brokers, cfg.Group)
 		return ok && members == 2 && state == "Stable"
 	}, "group to reach 2 members and Stable state")
 
 	// Produce 2 records per partition = 4 total
-	e.produce(t, "concurrent", 2)
+	e.Produce(t, "concurrent", 2)
 
-	run1.until(t, "all 4 records handled", func() bool {
+	run1.Until(t, "all 4 records handled", func() bool {
 		return totalCalls.Load() >= 4
 	})
 
-	testenv.Eventually(t, waitFor, func() bool {
-		return e.drained(t)
+	testenv.Eventually(t, harness.WaitFor, func() bool {
+		return e.Drained(t)
 	}, "both partitions to be drained and committed")
 
-	run1.cancel()
-	run2.cancel()
+	run1.Cancel()
+	run2.Cancel()
 
-	err1 := run1.wait(t, waitFor)
-	err2 := run2.wait(t, waitFor)
+	err1 := run1.Wait(t, harness.WaitFor)
+	err2 := run2.Wait(t, harness.WaitFor)
 
 	if err1 != nil {
 		t.Errorf("runner 1 exit error: %v", err1)
@@ -714,8 +715,8 @@ func TestEdge_RunConcurrentSameGroupSameConfig(t *testing.T) {
 // Snapshots slice backing arrays and spare capacity, asserts exact offset sequences
 // and checkpoints after both runs.
 func TestEdge_ConfigReusedAfterRunReturns(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
 	var (
 		mu      sync.Mutex
@@ -738,14 +739,14 @@ func TestEdge_ConfigReusedAfterRunReturns(t *testing.T) {
 	}
 
 	brokers := make([]string, 1, 5)
-	brokers[0] = e.brokers[0]
+	brokers[0] = e.Brokers[0]
 	topics := make([]string, 1, 5)
-	topics[0] = e.topic
+	topics[0] = e.Topic
 	clientOpts := make([]kgo.Opt, 0, 5)
 
 	cfg := offsetkeeper.Config{
 		Brokers:     brokers,
-		Group:       e.group,
+		Group:       e.Group,
 		Topics:      topics,
 		Handler:     h,
 		ClientOpts:  clientOpts,
@@ -760,19 +761,19 @@ func TestEdge_ConfigReusedAfterRunReturns(t *testing.T) {
 	initOptsLen, initOptsCap := len(cfg.ClientOpts), cap(cfg.ClientOpts)
 
 	// Run 1: produce and handle offsets 0, 1
-	e.produce(t, "batch1", 2)
-	run1 := start(t, ctx, cfg)
-	run1.until(t, "run1 handles 2 records", func() bool {
+	e.Produce(t, "batch1", 2)
+	run1 := harness.Start(t, ctx, cfg)
+	run1.Until(t, "run1 handles 2 records", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(run1Seq) >= 2
 	})
-	run1.cancel()
-	if err := run1.wait(t, waitFor); err != nil {
+	run1.Cancel()
+	if err := run1.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("first Run failed: %v", err)
 	}
 
-	comm1 := e.committed(t)
+	comm1 := e.Committed(t)
 	if comm1[0] != 2 {
 		t.Errorf("run1 checkpoint = %d, want 2", comm1[0])
 	}
@@ -787,19 +788,19 @@ func TestEdge_ConfigReusedAfterRunReturns(t *testing.T) {
 
 	// Run 2: switch flag, produce batch 2 (offsets 2, 3), reuse exact same cfg
 	currentRun.Store(2)
-	e.produce(t, "batch2", 2)
-	run2 := start(t, ctx, cfg)
-	run2.until(t, "run2 handles next 2 records", func() bool {
+	e.Produce(t, "batch2", 2)
+	run2 := harness.Start(t, ctx, cfg)
+	run2.Until(t, "run2 handles next 2 records", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(run2Seq) >= 2
 	})
-	run2.cancel()
-	if err := run2.wait(t, waitFor); err != nil {
+	run2.Cancel()
+	if err := run2.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("second Run failed: %v", err)
 	}
 
-	comm2 := e.committed(t)
+	comm2 := e.Committed(t)
 	if comm2[0] != 4 {
 		t.Errorf("run2 checkpoint = %d, want 4", comm2[0])
 	}
@@ -817,10 +818,10 @@ func TestEdge_ConfigReusedAfterRunReturns(t *testing.T) {
 // Case 18: Handler panic(nil) is recovered and retried exactly 3 times then DLQ'd.
 // After Run joins, requires exactly 3 attempts, DLQ attempts header "3", and checkpoint 1.
 func TestEdge_HandlerPanicNil(t *testing.T) {
-	ctx := testCtx(t)
-	e := newEnv(t, 1)
+	ctx := harness.Ctx(t)
+	e := harness.NewEnv(t, 1)
 
-	dlqTopic := testenv.Topic(t, e.brokers, 1)
+	dlqTopic := testenv.Topic(t, e.Brokers, 1)
 
 	var attempts atomic.Int32
 	h := func(ctx context.Context, r *kgo.Record) error {
@@ -828,21 +829,21 @@ func TestEdge_HandlerPanicNil(t *testing.T) {
 		panic(nil) // panic with nil value
 	}
 
-	cfg := e.cfg(h)
+	cfg := e.Cfg(h)
 	cfg.MaxAttempts = 3
 	cfg.Backoff = time.Millisecond
 	cfg.DLQTopic = dlqTopic
 
-	e.produce(t, "panic-nil", 1)
+	e.Produce(t, "panic-nil", 1)
 
-	run := start(t, ctx, cfg)
-	run.until(t, "DLQ record written and source committed", func() bool {
-		comm := e.committed(t)
+	run := harness.Start(t, ctx, cfg)
+	run.Until(t, "DLQ record written and source committed", func() bool {
+		comm := e.Committed(t)
 		return comm[0] == 1
 	})
 
-	run.cancel()
-	if err := run.wait(t, waitFor); err != nil {
+	run.Cancel()
+	if err := run.Wait(t, harness.WaitFor); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
@@ -851,12 +852,12 @@ func TestEdge_HandlerPanicNil(t *testing.T) {
 		t.Errorf("exact attempts after join = %d, want 3", got)
 	}
 
-	if got := e.total(t, dlqTopic); got != 1 {
+	if got := e.Total(t, dlqTopic); got != 1 {
 		t.Fatalf("DLQ total = %d, want 1", got)
 	}
 
 	// Verify DLQ headers
-	dlqCl, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...), kgo.ConsumeTopics(dlqTopic))
+	dlqCl, err := kgo.NewClient(kgo.SeedBrokers(e.Brokers...), kgo.ConsumeTopics(dlqTopic))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -877,11 +878,11 @@ func TestEdge_HandlerPanicNil(t *testing.T) {
 		t.Fatal("no DLQ record found")
 	}
 
-	attHeader, ok := header(foundRecord, "offsetkeeper.attempts")
+	attHeader, ok := harness.Header(foundRecord, "offsetkeeper.attempts")
 	if !ok || attHeader != "3" {
 		t.Errorf("DLQ attempts header = %q (ok=%v), want \"3\"", attHeader, ok)
 	}
-	errHeader, ok := header(foundRecord, "offsetkeeper.error")
+	errHeader, ok := harness.Header(foundRecord, "offsetkeeper.error")
 	if !ok || !strings.Contains(errHeader, "panic") {
 		t.Errorf("DLQ error header = %q (ok=%v), want containing \"panic\"", errHeader, ok)
 	}

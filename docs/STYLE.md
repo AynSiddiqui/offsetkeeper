@@ -5,7 +5,7 @@ file is stricter than the source, this file wins. Tooling enforces what it can
 (`gofmt`, `go vet`, `golangci-lint`); the rest is checked in review.
 
 ## Layout
-- Flat root package `offsetkeeper` for the public API; support code in `internal/`;
+- Single public package `offsetkeeper/` for the public API; support code in `internal/`;
   binaries in `cmd/<name>/`. No `pkg/` directory.
 - Keep tightly coupled types in one package. Never name a package `util`, `common` or `helper`.
 - Files are focused: neither one giant file nor many tiny ones.
@@ -66,7 +66,7 @@ Source: [Google best practices: option structure](https://google.github.io/style
 
 ## Globals
 - No package-level mutable state, no `init()` side effects, no flags registered by the library (only `package main` defines flags).
-- The only allowed globals are constants, immutable values, and documented test hooks defined in production files and set via `export_test.go` (such as `dlqTimeout`, defined in `dlq.go` and set via `export_test.go`).
+- The only allowed globals are constants, immutable values, and documented test hooks defined in production files and set via `offsetkeeper/export_test.go` (such as `dlqTimeout`, defined in `offsetkeeper/dlq.go` and set via `offsetkeeper/export_test.go`).
 - Inject clocks and clients through struct fields.
 
 Source: [Google decisions: global state](https://google.github.io/styleguide/go/decisions.html#global-state), [Uber: avoid mutable globals](https://github.com/uber-go/guide/blob/master/style.md#avoid-mutable-globals), [Uber: avoid init()](https://github.com/uber-go/guide/blob/master/style.md#avoid-init).
@@ -75,7 +75,7 @@ Source: [Google decisions: global state](https://google.github.io/styleguide/go/
 - Every package has a `Package x ...` comment (one file); every exported identifier has a doc comment that starts with its name and is a full sentence. Use "reports whether" for bool results.
 - Comments say why, not what. Mark removals with a `Deprecated:` paragraph that names the replacement.
 - Use doc links (`[Run]`, `[kgo.Record]`), `# Heading`s sparingly, and indented code for snippets.
-- Usage lives in testable `Example` functions in `example_test.go` (package `offsetkeeper_test`). Examples that need a broker compile but have no `// Output:`.
+- Usage lives in testable `Example` functions in `offsetkeeper/example_test.go` (package `offsetkeeper_test`). Examples that need a broker compile but have no `// Output:`.
 - A guarantee change updates `CONTRACT.md` and its named test in the same PR.
 
 Source: [Go Doc Comments](https://go.dev/doc/comment), [Google best practices: examples](https://google.github.io/styleguide/go/best-practices.html#examples).
@@ -86,7 +86,7 @@ Source: [Go Doc Comments](https://go.dev/doc/comment), [Google best practices: e
 - Failure messages: `F(input) = got, want want`. Use `t.Error` to keep checking; `t.Fatal` only when later checks are meaningless. `cmp.Diff`-style output, no assertion libraries.
 - Unique topic and group per test (`internal/testenv`). No `time.Sleep`: poll to a deadline.
 - Run with `-race -count=1`. Default is kfake; real-broker suites run in CI and on request (`OFFSETKEEPER_BROKERS`).
-- Peer projects ask the same: client_golang and OpenTelemetry-Go require tests with each change and benchmarks (with `benchstat`) for performance work; franz-go ships kfake so features are tested in-process; Watermill ships a pub/sub conformance suite, which is what `contract_test.go` does here.
+- Peer projects ask the same: client_golang and OpenTelemetry-Go require tests with each change and benchmarks (with `benchstat`) for performance work; franz-go ships kfake so features are tested in-process; Watermill ships a pub/sub conformance suite, which is what `offsetkeeper/contract_test.go` does here.
 
 Source: [Google decisions: test failure messages](https://google.github.io/styleguide/go/decisions.html#useful-test-failures), [Google best practices: test helpers](https://google.github.io/styleguide/go/best-practices.html#test-helpers), [OpenTelemetry-Go CONTRIBUTING: tests](https://github.com/open-telemetry/opentelemetry-go/blob/main/CONTRIBUTING.md).
 

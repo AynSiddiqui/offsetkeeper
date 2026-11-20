@@ -6,7 +6,7 @@ queue that cannot commit past an unsettled record.
 **Status:** v0.1.0, the first release. Before v1.0.0 the API may change in a minor release; the [changelog](CHANGELOG.md) says when.
 
 ```bash
-go get github.com/AynSiddiqui/offsetkeeper@v0.1.0
+go get github.com/AynSiddiqui/offsetkeeper/offsetkeeper
 ```
 
 - [docs/CONTRACT.md](docs/CONTRACT.md): what is guaranteed, and the test behind each guarantee
@@ -31,7 +31,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/AynSiddiqui/offsetkeeper"
+	"github.com/AynSiddiqui/offsetkeeper/offsetkeeper"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 

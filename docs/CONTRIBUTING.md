@@ -41,7 +41,7 @@ BREAKING CHANGE: what breaks and how to migrate.   (only when it does)
 ```
 
 - **Types:** `feat` `fix` `docs` `test` `refactor` `perf` `build` `ci` `chore` `revert`.
-- **Scope** is the Go package path's last element: `cmd` (for `cmd/offsetkeeper`), `dlq`, `testenv`, or `offsetkeeper` (or omit for the root package); `deps` is reserved for Dependabot.
+- **Scope** is the Go package path's last element: `cmd` (for `cmd/offsetkeeper`), `dlq`, `testenv`, or `offsetkeeper` (the library package); `deps` is reserved for Dependabot.
 - **Breaking:** add `!` before the colon (`feat(dlq)!: ...`) and a `BREAKING CHANGE:` footer.
 - Header: imperative, lowercase after the colon, no trailing period, ≤72 characters total ("fix(dlq): wait for ack before committing").
 - Body: wrap at 72, explain *why*, not what the diff shows. Include `benchstat`
@@ -75,6 +75,16 @@ Full rules and sources: [STYLE.md](STYLE.md). The short list:
 - Comments explain why, not what.
 - Run `gofmt`, `go vet` and `golangci-lint run` before pushing.
 - Keep the exported API minimal.
+
+## Repository layout
+
+- `offsetkeeper/`: the library package (import path `github.com/AynSiddiqui/offsetkeeper/offsetkeeper`) and its tests. In-package tests sit beside the code to reach unexported symbols and the `export_test.go` hooks; `contract_test.go` and `example_test.go` are black-box (`offsetkeeper_test`). The root holds no Go files.
+- `test/edge/`: black-box edge suites (config, lifecycle, records) that need no hooks.
+- `internal/harness/`: helpers shared by `offsetkeeper/contract_test.go` and `test/edge/` (`NewEnv`, `Start`, `Calls`, ...). Import it only from external test packages: it imports `offsetkeeper`, so an in-package test would create a cycle.
+- `internal/testenv/`: broker, topic and produce helpers; safe for in-package tests.
+- `internal/dlq/`: the dead-letter record format and replay.
+- `cmd/offsetkeeper/`: the CLI.
+- `docs/`: contributor guidelines and the contract.
 
 ## Tests
 - Always `-race`: `go test -race -count=1 ./...`.
@@ -122,13 +132,13 @@ Full rules and sources: [STYLE.md](STYLE.md). The short list:
   SMOKE_DIR=$(mktemp -d)
   cd "$SMOKE_DIR"
   go mod init example.com/smoke
-  go get github.com/AynSiddiqui/offsetkeeper@v0.1.0
+  go get github.com/AynSiddiqui/offsetkeeper/offsetkeeper@vX.Y.Z
   awk '/^```go/{flag=1; next} /^```/{if(flag) exit} flag{print}' "$REPO_ROOT/README.md" > main.go
   go build .
   go install github.com/AynSiddiqui/offsetkeeper/cmd/offsetkeeper@v0.1.0
   rm -rf "$SMOKE_DIR"
   ```
-- **pkg.go.dev check**: verify documentation and example rendering at `https://pkg.go.dev/github.com/AynSiddiqui/offsetkeeper@v0.1.0`.
+- **pkg.go.dev check**: verify documentation and example rendering at `https://pkg.go.dev/github.com/AynSiddiqui/offsetkeeper/offsetkeeper@vX.Y.Z`.
 - **GitHub settings checklist**:
   - Private vulnerability reporting enabled (Settings → Code security and analysis).
   - Squash merging only (disallow merge commits and rebase merging).
