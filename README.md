@@ -95,6 +95,15 @@ docker compose up -d kafka
 docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic my-topic --partitions 1 --replication-factor 1
 docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic my-topic.dlq --partitions 1 --replication-factor 1
 docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic my-topic <<< "hello offsetkeeper"
+```
+
+Then run the quickstart from your own module (save it as `main.go`):
+
+```bash
+mkdir offsetkeeper-demo && cd offsetkeeper-demo
+go mod init example.com/demo
+# save the quickstart above as main.go here
+go get github.com/AynSiddiqui/offsetkeeper/offsetkeeper
 go run .
 ```
 
