@@ -26,6 +26,9 @@ const (
 	// that ended the handlers (shutdown, error exit), so it ignores ctx and
 	// needs its own limit.
 	commitTimeout = 10 * time.Second
+	// leaveTimeout bounds the LeaveGroup at shutdown. kgo's own Close leaves with
+	// a ctx that never expires, so an unreachable broker would stall Run for a minute.
+	leaveTimeout = 5 * time.Second
 )
 
 // Handler processes one record. Its return value is the only settlement:
@@ -152,8 +155,16 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("offsetkeeper: create client: %w", err)
 	}
-	// Close alone hangs if the last poll did not AllowRebalance (error exit).
-	defer cl.CloseAllowingRebalance()
+	defer func() {
+		// Close alone hangs if the last poll did not AllowRebalance (error exit).
+		cl.AllowRebalance()
+		// Close would leave with a ctx that never expires; leaving first with a
+		// bounded one makes the Close below return at once (kgo client.go:1372-1375).
+		lctx, cancel := context.WithTimeout(context.Background(), leaveTimeout)
+		defer cancel()
+		_ = cl.LeaveGroupContext(lctx) // best effort: the session timeout evicts us anyway
+		cl.Close()
+	}()
 
 	w := &worker{cfg: cfg, cl: cl}
 	// Checking ctx first means a Run that starts cancelled never polls.

@@ -47,8 +47,12 @@ cluster, Apache Kafka and Redpanda.
    nil or settled via DLQ are committed, then `Run` returns nil (or any commit
    error if committing fails). Unsettled records are redelivered later. A
    handler that fails only because of the cancel is not dead-lettered.
+   If the broker is unreachable, `Run` still returns: the final commit is
+   bounded at 10s and the group leave at 5s, then kgo's close adds up to 2s,
+   so about 17s after the cancel (handlers excluded; they are not bounded).
    Proof: `TestShutdownDrains`, `TestShutdownDrainsWithDLQ`,
-   `TestNoRecordHandledAfterCancel`, `TestRetryBackoffStopsOnShutdown`.
+   `TestNoRecordHandledAfterCancel`, `TestRetryBackoffStopsOnShutdown`,
+   `TestRun_BrokerBlackholeBoundedShutdown`, `TestRunLeavesGroupOnShutdown`.
 7. **DLQ record.** Same key, value and headers as the source, plus
    `offsetkeeper.source.topic`, `offsetkeeper.source.partition`,
    `offsetkeeper.source.offset`, `offsetkeeper.error` (capped at 4 KiB) and

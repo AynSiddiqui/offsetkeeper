@@ -552,6 +552,85 @@ func TestEdgeCommitTimeout(t *testing.T) {
 	}
 }
 
+// A broker that goes silent (black hole) must not stall shutdown: Run returns
+// within commitTimeout + leaveTimeout (+ about 2s of kgo's own Close waits,
+// client.go:1425 and :1447) of the cancel, not after kgo's unbounded
+// LeaveGroup retries (52-72s measured).
+func TestRun_BrokerBlackholeBoundedShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("takes about commitTimeout + leaveTimeout")
+	}
+	if os.Getenv("OFFSETKEEPER_BROKERS") != "" {
+		t.Skip("black-holes the broker with kfake's Control; a real broker cannot be told to")
+	}
+	cluster, ctx := testenv.Kfake(t), testCtx(t)
+	brokers := cluster.ListenAddrs()
+	e := env{brokers, testenv.Topic(t, brokers, 1), testenv.Group(t), 1}
+	e.produce(t, "r", 1)
+
+	// From the first OffsetCommit on, every request goes unanswered.
+	var silent atomic.Bool
+	seen := make(chan struct{}, 1)
+	cluster.ControlKey(int16(kmsg.OffsetCommit), func(kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		silent.Store(true)
+		select {
+		case seen <- struct{}{}:
+		default:
+		}
+		return nil, nil, true
+	})
+	cluster.Control(func(kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		return nil, nil, silent.Load()
+	})
+
+	r := start(t, ctx, e.cfg(func(context.Context, *kgo.Record) error { return nil }))
+	select {
+	case <-seen:
+	case <-time.After(10 * time.Second):
+		t.Fatal("OffsetCommit never reached the broker")
+	}
+	t0 := time.Now()
+	r.cancel()
+	err := r.wait(t, 2*(commitTimeout+leaveTimeout)+30*time.Second)
+	d := time.Since(t0)
+	t.Logf("Run returned %v after the cancel; err=%v", d.Round(100*time.Millisecond), err)
+	if limit := commitTimeout + leaveTimeout + 3*time.Second; d > limit {
+		t.Errorf("Run took %v after cancel, want <= %v", d, limit)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error %v should wrap context.DeadlineExceeded", err)
+	}
+}
+
+// The bounded leave still happens on a healthy broker: the member is gone from
+// the group as soon as Run returns, not after the session timeout.
+func TestRunLeavesGroupOnShutdown(t *testing.T) {
+	brokers, ctx := testenv.Brokers(t), testCtx(t)
+	e := env{brokers, testenv.Topic(t, brokers, 1), testenv.Group(t), 1}
+	e.produce(t, "r", 1)
+	var handled atomic.Bool
+	r := start(t, ctx, e.cfg(func(context.Context, *kgo.Record) error { handled.Store(true); return nil }))
+	r.until(t, "the record to be handled", handled.Load)
+	r.cancel()
+	if err := r.wait(t, 20*time.Second); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	gs, err := kadm.NewClient(cl).DescribeGroups(ctx, e.group)
+	if err != nil || gs[e.group].Err != nil {
+		t.Fatalf("describe group: %v / %v", err, gs[e.group].Err)
+	}
+	if n := len(gs[e.group].Members); n != 0 {
+		t.Errorf("group has %d members after Run returned, want 0", n)
+	}
+}
+
 // Case 9a: Publisher: Publish with zero records.
 // docs/CONTRACT.md Guarantee 8 & doc comment for Publish:
 // Publish with no records returns nil without error or panic.

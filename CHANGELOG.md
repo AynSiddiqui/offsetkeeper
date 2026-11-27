@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-11-28
+
+### Fixed
+
+- `Run` no longer stalls 50-70s at shutdown when the broker is unreachable: the group leave is bounded at 5s, so `Run` returns about 17s after the cancel (10s commit + 5s leave + kgo's close).
+
 ## [v0.2.0] - 2026-11-28
 
 Pre-1.0 breaking release: the import path changed.
@@ -27,6 +33,7 @@ First release.
 - `offsetkeeper dlq list` (streams rows, escapes free text) and `offsetkeeper dlq replay` (one record, or every record not yet replayed), with `-tls` and a 15s connection check.
 - `CONTRACT.md`, with a named test for every guarantee. Contract and edge-case suites run on kfake, Apache Kafka and Redpanda.
 
-[Unreleased]: https://github.com/AynSiddiqui/offsetkeeper/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AynSiddiqui/offsetkeeper/compare/v0.2.1...HEAD
+[v0.2.1]: https://github.com/AynSiddiqui/offsetkeeper/compare/v0.2.0...v0.2.1
 [v0.2.0]: https://github.com/AynSiddiqui/offsetkeeper/compare/v0.1.0...v0.2.0
 [v0.1.0]: https://github.com/AynSiddiqui/offsetkeeper/releases/tag/v0.1.0
