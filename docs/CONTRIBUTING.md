@@ -110,7 +110,7 @@ Full rules and sources: [STYLE.md](STYLE.md). The short list:
   release; say so in the changelog.
 - [Keep a Changelog](https://keepachangelog.com/en/1.1.0/): add a line under
   *Unreleased* in the PR, using *Added*, *Changed*, *Deprecated*, *Removed*,
-  *Fixed* or *Security*. At release, move the lines under `## vX.Y.Z - YYYY-MM-DD`.
+  *Fixed* or *Security*. At release, move the lines under `## [vX.Y.Z] - YYYY-MM-DD`.
 - Compatibility follows [Keeping your modules compatible](https://go.dev/blog/module-compatibility):
   add, do not change or remove. Deprecate with a `Deprecated:` comment for at
   least one minor release before removal in a major.
@@ -124,7 +124,7 @@ Full rules and sources: [STYLE.md](STYLE.md). The short list:
   For the first release tag (`v0.1.0`), run `gorelease -base=none -version=v0.1.0`.
   An incompatible change needs a major bump (or `0.y` minor while pre-1.0)
   and a `BREAKING CHANGE:` footer.
-- Release steps: green CI on `main`, stage dated `## v0.1.0 - YYYY-MM-DD` changelog section and README status, update `CHANGELOG.md`, tag `vX.Y.Z`
+- Release steps: green CI on `main`, stage the dated `## [vX.Y.Z] - YYYY-MM-DD` section in `CHANGELOG.md` (with its compare link) and the README status and install pin, tag `vX.Y.Z`
   (annotated), push the tag, create the GitHub release from the changelog
   section. Releases are not signed and ship no SBOM.
 - **Post-tag smoke test** in a fresh module without `replace`:
@@ -135,7 +135,7 @@ Full rules and sources: [STYLE.md](STYLE.md). The short list:
   go get github.com/AynSiddiqui/offsetkeeper/offsetkeeper@vX.Y.Z
   awk '/^```go/{flag=1; next} /^```/{if(flag) exit} flag{print}' "$REPO_ROOT/README.md" > main.go
   go build .
-  go install github.com/AynSiddiqui/offsetkeeper/cmd/offsetkeeper@v0.1.0
+  go install github.com/AynSiddiqui/offsetkeeper/cmd/offsetkeeper@vX.Y.Z
   rm -rf "$SMOKE_DIR"
   ```
 - **pkg.go.dev check**: verify documentation and example rendering at `https://pkg.go.dev/github.com/AynSiddiqui/offsetkeeper/offsetkeeper@vX.Y.Z`.
